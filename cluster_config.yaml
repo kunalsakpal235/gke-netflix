@@ -1,0 +1,97 @@
+# cluster_config.yaml
+# ─────────────────────────────────────────────────────────────
+# K8s Factory MCP v3 — Example Cluster Configuration
+# Pass this YAML as the `config` argument to plan_cluster
+# ─────────────────────────────────────────────────────────────
+
+cluster_name: my-prod-cluster
+k8s_version:  "1.30"
+cni:          cilium           # cilium | calico | flannel | weave
+pod_cidr:     "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+profile:      production       # production | development | ml-gpu | edge | multi-tenant
+monitoring:   prometheus       # prometheus | prometheus-loki | none
+
+# ── Corporate proxy (optional) ──────────────────────────────
+# If your servers only reach the internet through a proxy, uncomment and fill
+# this in. Applied automatically to every package manager (apt/dnf/zypper),
+# containerd, curl, helm, and kubectl apply -f <url> across the entire
+# cluster lifecycle — not just node prep, also upgrades and Helm installs.
+# proxy:
+#   http_proxy:  "http://proxy.corp.local:3128"
+#   https_proxy: "http://proxy.corp.local:3128"
+#   no_proxy:    "localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local,.corp.local"
+
+# ── Masters (control plane nodes) ────────────────────────────
+# 1 entry = single master, no HA.
+# 2+ entries = automatic multi-master HA (kubeadm --upload-certs +
+#              --control-plane join for masters after the first).
+masters:
+  - name:    master-1
+    ip:      192.168.1.10
+    user:    ubuntu
+    ssh_key: ~/.ssh/id_rsa
+    # os_family omitted -> auto-detected over SSH (Ubuntu/Debian, RHEL-family, or SUSE)
+
+  # For HA, add more masters — they can run a different OS, just say so explicitly:
+  # - name:    master-2
+  #   ip:      192.168.1.11
+  #   user:    centos
+  #   ssh_key: ~/.ssh/id_rsa
+  #   os_family: rhel
+  # - name:    master-3
+  #   ip:      192.168.1.12
+  #   user:    ubuntu
+  #   ssh_key: ~/.ssh/id_rsa
+
+# ── Workers ───────────────────────────────────────────────────
+workers:
+  - name:    worker-1
+    ip:      192.168.1.20
+    user:    ubuntu
+    ssh_key: ~/.ssh/id_rsa
+
+  - name:    worker-2
+    ip:      192.168.1.21
+    user:    ubuntu
+    ssh_key: ~/.ssh/id_rsa
+
+  - name:    worker-3
+    ip:      192.168.1.22
+    user:    ubuntu
+    ssh_key: ~/.ssh/id_rsa
+    # os_family: rhel   <- nodes can mix OS families freely in the same cluster
+
+# ── CNI options (optional overrides) ─────────────────────────
+# For Cilium — enable BGP instead of default VXLAN:
+# cni_options:
+#   routingMode: native
+#   bgpControlPlane.enabled: "true"
+#   hubble.relay.enabled: "true"
+
+# For Calico — use BGP mode:
+# cni_options:
+#   installation.calicoNetwork.bgp: Enabled
+
+# ── Extra Helm packages (optional, on top of profile) ─────────
+# extra_helm_packages:
+#   - repo:    longhorn
+#     url:     https://charts.longhorn.io
+#     chart:   longhorn/longhorn
+#     release: longhorn
+#     ns:      longhorn-system
+
+# ─────────────────────────────────────────────────────────────
+# PROFILE PACKAGE SETS
+# ─────────────────────────────────────────────────────────────
+# production:    ArgoCD, cert-manager, ingress-nginx, MetalLB, Velero
+# development:   ArgoCD, ingress-nginx, cert-manager
+# ml-gpu:        NVIDIA GPU Operator, Argo Workflows, Kubeflow Training Operator
+# edge:          MetalLB, Longhorn (distributed storage)
+# multi-tenant:  ArgoCD, cert-manager, Kiosk (namespace isolation), ingress-nginx
+#
+# Monitoring and Jenkins are now separate tools, not tied to profile:
+#   install_monitoring  -> prometheus | prometheus-loki | none
+#   install_jenkins     -> always ClusterIP-only, run after the stack is up
+# ─────────────────────────────────────────────────────────────
+
