@@ -171,9 +171,70 @@ future development. Pull requests welcome.
 |---------|-------|
 | Next-step menus | Every successful tool call returns a numbered menu of contextual next actions |
 | plan_cluster prompting | Asks for CNI, profile, monitoring, proxy if not specified rather than guessing |
-| Dry-run mode | `prepare_nodes`, `bootstrap_cluster`, `install_cni`, `install_stack`, `install_jenkins`, `scale_cluster`, `upgrade_cluster`, `provision_storage` all support `dry_run: true` |
+| Dry-run mode | Every mutating tool supports `dry_run: true`; `global_dry_run: true` in config applies to all tools |
 | Config validation | All required fields, supported values, and node_config options validated before anything touches nodes |
 | node_config summary | `plan_cluster` always shows what kernel/sysctl/iptables/SELinux/swap settings will be applied |
+
+### Session persistence and multi-cluster
+
+| Feature | Tool / mechanism | Notes |
+|---------|-----------------|-------|
+| Auto session save | `done()` helper | State saved to `~/.k8s-mcp/state.json` after every successful tool call |
+| Session auto-restore | Module startup | `_load_state()` runs at import — state restored from disk on every terminal open |
+| Named cluster sessions | `save_cluster` | Save current session under a human-readable name |
+| Multi-cluster switching | `switch_cluster` | Load any saved session as the active one; all tools follow |
+| Cluster listing | `list_clusters` | Shows all saved clusters with versions, node counts, and installed packages |
+| Session cleanup | `delete_cluster` | Remove a named session from registry (does not destroy actual cluster) |
+| State file location | `~/.k8s-mcp/state.json` | `chmod 600`, JSON format |
+| Clusters registry location | `~/.k8s-mcp/clusters.json` | `chmod 600`, JSON format |
+
+### Audit trail
+
+| Feature | Tool / mechanism | Notes |
+|---------|-----------------|-------|
+| Per-call audit logging | `_audit()` called on every `call_tool` entry | Logs tool name, cluster, parameters, outcome |
+| Secret masking | Automatic in `_audit()` | Passwords, tokens, keys replaced with `***` before writing |
+| Audit log viewer | `show_audit_log` | Filterable by cluster name and tool name |
+| Audit log location | `~/.k8s-mcp/audit.log` | `chmod 600`, JSON lines format |
+
+### Reliability and safety
+
+| Feature | Tool / behaviour | Notes |
+|---------|-----------------|-------|
+| `bootstrap_cluster` idempotency | Pre-checks `/etc/kubernetes/admin.conf` | Skips `kubeadm init` if master already initialized; regenerates fresh join token and cert key instead |
+| Certificate key TTL auto-regeneration | Inside `bootstrap_cluster` | Cert keys expire after 2 hours; always regenerated fresh on HA master joins |
+| `install_stack` resume-from-failure | Tracks `_state["stack_installed"]` | Re-run after failure skips already-installed releases, retries only failed ones |
+| CIDR overlap detection | `plan_cluster` + `validate_config` | `pod_cidr` and `service_cidr` checked for overlap using Python `ipaddress` module |
+| Node name uniqueness | `plan_cluster` + `validate_config` | Duplicate node names caught before SSH is attempted |
+| SSH key existence check | `validate_config` | Warns if SSH key files don't exist on the local machine |
+| K8s version format check | `validate_config` | Enforces `MAJOR.MINOR` format before any install |
+| Credential rotation warning | `generate_cluster_report` | Always shows which credentials to rotate and how, plus instructions not to commit to git |
+| Global dry-run mode | `global_dry_run: true` in config | Applies dry-run to every tool in the session without per-tool flags |
+
+### Offline validation
+
+| Feature | Tool | Notes |
+|---------|------|-------|
+| Offline config validation | `validate_config` | Validates CIDR, field presence, node names, SSH keys, K8s version format — no SSH required |
+
+### Preflight checks
+
+| Feature | Tool | Notes |
+|---------|------|-------|
+| Pre-bootstrap node check | `preflight_check` | Checks disk, RAM, ports, swap, internet, and all required tools in parallel across nodes |
+| Auto-fix missing tools | `preflight_check` (fix: true) | Installs Helm, etcdctl, git, jq automatically if missing |
+
+### Repository files
+
+| File | Description |
+|------|-------------|
+| `examples/single-node-dev.yaml` | Single-node dev cluster — minimum hardware, flannel CNI |
+| `examples/3-node-production.yaml` | Standard production: 1 master + 2 workers, Cilium |
+| `examples/5-node-ha.yaml` | HA: 3 masters + 2 workers, supports mixed OS |
+| `examples/openstack-rhel-proxy.yaml` | OpenStack RHEL 8 with corporate proxy — tested config |
+| `examples/gpu-ml-cluster.yaml` | GPU workers, ml-gpu profile, highperf sysctl |
+| `CONTRIBUTING.md` | How to add tools, OS support, compliance checks, example configs |
+| `LICENSE` | Apache 2.0 |
 
 ---
 
@@ -190,32 +251,32 @@ future development. Pull requests welcome.
 
 ### Medium priority — production hardening
 
-- [ ] **Pod security admission** — configure PodSecurity admission controller baseline/restricted profiles per namespace via `provision_namespace`.
-- [ ] **NetworkPolicy default-deny** — optionally apply a default-deny NetworkPolicy to newly provisioned namespaces.
-- [ ] **etcd encryption at rest** — configure `EncryptionConfiguration` for etcd before `bootstrap_cluster` for clusters that handle sensitive data.
-- [ ] **Audit logging** — configure the K8s API server audit policy file as part of `bootstrap_cluster`.
-- [ ] **Node draining timeout config** — `scale_cluster` drain currently uses a fixed timeout; make it configurable.
-- [ ] **Cluster backup scheduling** — `backup_etcd` is currently manual; add a `schedule_backup` tool that writes a CronJob to run periodic snapshots.
-- [ ] **Multi-etcd external cluster** — currently etcd is stacked (runs on master nodes). Support external etcd topology for very large HA clusters.
+- ✅ **Pod security admission** — implemented as `configure_pod_security` tool (baseline/restricted per namespace).
+- ✅ **NetworkPolicy default-deny** — implemented inside `configure_pod_security` (default_deny_network: true).
+- ✅ **etcd encryption at rest** — implemented as `configure_etcd_encryption` (AES-CBC or AES-GCM).
+- ✅ **Audit logging** — implemented as `configure_audit_logging` (API server) + `~/.k8s-mcp/audit.log` (MCP level).
+- [ ] **Node draining timeout config** — `scale_cluster` drain uses a fixed timeout; make it configurable.
+- [ ] **Cluster backup scheduling** — `backup_etcd` is manual; add a `schedule_backup` tool writing a CronJob.
+- [ ] **Multi-etcd external cluster** — etcd is stacked (on master nodes). Support external etcd topology for very large HA clusters.
 
 ### Lower priority — nice to have
 
 - [ ] **GPU node labelling** — after joining a GPU worker, automatically add `nvidia.com/gpu=true` label.
-- [ ] **Istio service mesh** — add Istio to the supported `install_stack` profiles (complex enough to warrant its own tool or profile).
-- [ ] **OIDC / SSO integration** — configure kube-apiserver OIDC flags for enterprise SSO (Keycloak, Okta, Azure AD) as part of `bootstrap_cluster` or a new `configure_auth` tool.
-- [ ] **Cluster cost reporting** — a `cost_report` tool that queries Kubernetes metrics server + cloud billing API and produces a per-namespace cost breakdown.
-- [ ] **Windows worker nodes** — Windows container support is a different bootstrap path entirely; would need a separate prep script branch.
-- [ ] **ARM64 / mixed-arch clusters** — prep scripts use the same binary names; test and document ARM64 node support explicitly.
-- [ ] **Automatic cert renewal CronJob** — write a CronJob that calls `kubeadm certs renew all` 30 days before expiry rather than relying on manual `rotate_certs`.
+- [ ] **Istio service mesh** — add Istio to the supported `install_stack` profiles (complex enough to warrant its own tool).
+- ✅ **OIDC / SSO integration** — implemented as `install_applications` with Keycloak, which wires kube-apiserver OIDC flags automatically.
+- ✅ **Cluster cost reporting** — implemented as `cost_report` tool with per-namespace breakdown and cloud/on-prem rates.
+- [ ] **Windows worker nodes** — Windows container support needs a separate prep script branch.
+- [ ] **ARM64 / mixed-arch clusters** — prep scripts use same binary names; test and document ARM64 explicitly.
+- [ ] **Automatic cert renewal CronJob** — write a CronJob that calls `kubeadm certs renew all` 30 days before expiry.
 
 ### Repo / community infrastructure
 
 - [ ] **GitHub Actions CI** — lint the Python file on push, run `python3 -W error -c "import ast; ast.parse(...)"` as a check.
 - [ ] **Test fixtures with kind** — a `tests/` directory that spins up a local `kind` cluster and smoke-tests each MCP tool against it (no real VMs needed for CI).
-- [ ] **Example configs directory** — `examples/` folder with ready-to-use configs for common setups: single-node dev, 3-node production, OpenStack, Proxmox, bare-metal RHEL.
-- [ ] **Contributing guide** — `CONTRIBUTING.md` explaining how to add a new tool, a new profile, or a new OS family.
+- ✅ **Example configs directory** — `examples/` folder with 5 configs: single-node-dev, 3-node-production, 5-node-ha, openstack-rhel-proxy, gpu-ml-cluster.
+- ✅ **Contributing guide** — `CONTRIBUTING.md` covering how to add tools, OS support, compliance checks, and example configs.
 - [ ] **Changelog** — `CHANGELOG.md` tracking what changes between releases. Start from k8s-mcp-v1.
-- [ ] **License file** — `LICENSE` (Apache 2.0 recommended for infrastructure tooling).
+- ✅ **License file** — `LICENSE` (Apache 2.0).
 
 ---
 
@@ -223,7 +284,7 @@ future development. Pull requests welcome.
 
 | Release | Tools | Description |
 |---------|-------|-------------|
-| k8s-mcp-v1 | 34 | Initial public release — full cluster lifecycle, OS-aware, HA, proxy, security, applications, compliance, cost reporting, cluster report |
+| k8s-mcp-v1 | 41 | Initial public release — full cluster lifecycle, OS-aware, HA, proxy, security, applications, compliance, cost reporting, cluster report, session persistence, multi-cluster management, audit trail, offline validation, idempotent bootstrap, resume-from-failure install |
 
 ---
 
