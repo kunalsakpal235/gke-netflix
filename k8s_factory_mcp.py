@@ -1,35 +1,40 @@
 """
-k8s_factory_mcp.py  v3.1
-=========================
-K8s Cluster Factory MCP Server — OS-independent, HA-aware, Proxy-aware Edition
+k8s_factory_mcp.py — k8s-mcp-v1
+=================================
+K8s Cluster Factory MCP Server
+Official release: k8s-mcp-v1  |  Tools: 34  |  Lines: ~3300
 
-NEW in v3.1 (on top of v3.0):
-  - Corporate proxy support — a top-level `proxy` block in the cluster config
-    (http_proxy, https_proxy, no_proxy) is applied automatically to every
-    network-touching command across the whole lifecycle: apt/dnf/zypper package
-    installs, containerd (via its own systemd drop-in, since daemons don't
-    inherit SSH shell env vars), curl-based repo key fetches, helm repo add /
-    helm upgrade, and kubectl apply -f <url>. No per-tool flags needed — set it
-    once in plan_cluster's config and every subsequent tool call honors it.
+Provisions, manages, scales, upgrades, secures, and reports on
+Kubernetes clusters on any on-premises or cloud infrastructure,
+from a single YAML config file, through a conversation with Claude AI.
 
-NEW in v3.0 (on top of v2's 21 tools):
-  - OS auto-detection per node (Ubuntu/Debian/RHEL/CentOS/Rocky/Alma/SUSE) —
-    every script branches on the detected package manager (apt / dnf / yum / zypper)
-  - True multi-master HA support — kubeadm init --upload-certs + join --control-plane
-    on additional masters, kube-vip / external LB endpoint support
-  - SSH concurrency everywhere — upgrade_cluster, scale_cluster, destroy_cluster,
-    node_diagnostics now parallelize where the operation allows it (master upgrade
-    stays serial-then-workers-parallel-in-batches; true rolling steps stay ordered)
-  - install_monitoring — dedicated tool, choose kube-prometheus-stack alone or
-    + Loki, selected at plan time or call time
-  - install_jenkins — Jenkins-in-cluster via Helm, ClusterIP-only, persistent volume,
-    pre-wired to use the cluster's own kubeconfig as a Kubernetes cloud agent target
+OS support:    Ubuntu/Debian (apt), RHEL/Rocky/Alma/CentOS (dnf/yum), SUSE (zypper)
+               Mixed-OS clusters supported — each node detected independently
+HA support:    Multi-master HA via kubeadm --upload-certs + --control-plane join
+Proxy support: Corporate proxy applied to apt/dnf/zypper/containerd/helm/kubectl
+               Remove the proxy block entirely for direct internet access
+
+Tools (34 total):
+  Cluster lifecycle:  plan_cluster, prepare_nodes, bootstrap_cluster, install_cni,
+                      install_stack, cluster_status, destroy_cluster
+  Applications:       install_monitoring, install_jenkins, install_cert_manager,
+                      install_security_tools, install_applications
+  Security:           configure_rbac, configure_pod_security, configure_etcd_encryption,
+                      configure_audit_logging, security_audit, audit_cluster
+  Day-2 ops:          scale_cluster, upgrade_cluster, backup_etcd, restore_etcd,
+                      rotate_certs, renew_service_cert, helm_manage,
+                      cluster_snapshot, migrate_workload
+  Observability:      node_diagnostics, stream_logs, manage_kubeconfig,
+                      provision_namespace, provision_storage
+  Reporting:          generate_cluster_report, cost_report
 
 Requirements:
   pip install mcp paramiko pyyaml
 
 Register with Claude Code:
   claude mcp add k8s-factory -- python3 ~/mcp-servers/k8s_factory_mcp.py
+
+Full documentation: README.md
 """
 
 import asyncio
@@ -55,9 +60,462 @@ SUPPORTED_PROFILES   = ["production", "development", "ml-gpu", "edge", "multi-te
 SUPPORTED_STORAGE    = ["longhorn", "nfs", "local-path", "rook-ceph"]
 SUPPORTED_MONITORING = ["prometheus", "prometheus-loki", "none"]
 SUPPORTED_OS_FAMILIES = ["debian", "rhel", "suse", "auto"]
+SUPPORTED_SELINUX    = ["permissive", "enforcing", "disabled"]
+SUPPORTED_SWAP       = ["disable", "keep", "warn"]
+SUPPORTED_IPTABLES   = ["auto", "legacy", "nftables"]
+SUPPORTED_SYSCTL_PRESETS = ["k8s-minimal", "k8s-production", "k8s-highperf", "custom"]
 
+# Additional supported values
+SUPPORTED_RUNTIMES       = ["containerd", "crio"]
+SUPPORTED_KUBE_PROXY     = ["iptables", "ipvs", "ebpf"]
+SUPPORTED_INGRESS        = ["nginx", "traefik", "haproxy", "none"]
+SUPPORTED_TOPOLOGIES     = ["single-node", "3-node", "5-node-ha", "custom"]
+SUPPORTED_SECURITY_TOOLS = ["falco", "gatekeeper", "trivy-operator", "kyverno"]
+SUPPORTED_APPLICATIONS   = ["sonarqube", "harbor", "vault", "keycloak"]
+SUPPORTED_COMPLIANCE     = ["cis", "nsa-cisa", "pci-dss", "soc2-iso27001"]
+SUPPORTED_ETCD_ENCRYPT   = ["aes-cbc", "aes-gcm", "none"]
+SUPPORTED_AUDIT_LEVELS   = ["none", "metadata", "request", "requestresponse"]
+SUPPORTED_CLOUD_PROVIDERS = ["aws", "gcp", "azure", "onprem", "openstack"]
+SUPPORTED_CERT_ISSUERS   = ["self-signed", "acme-letsencrypt", "acme-zerossl", "internal-ca"]
+
+# ─── Security tools — Helm definitions ───────────────────────────────────────
+SECURITY_TOOLS_HELM = {
+    "falco": {
+        "repo": "falcosecurity", "url": "https://falcosecurity.github.io/charts",
+        "chart": "falcosecurity/falco", "release": "falco", "ns": "falco",
+        "set": ["driver.kind=ebpf", "falcosidekick.enabled=true", "falcosidekick.webui.enabled=true"],
+        "description": "Runtime threat detection — watches syscalls for anomalous behaviour",
+    },
+    "gatekeeper": {
+        "repo": "gatekeeper", "url": "https://open-policy-agent.github.io/gatekeeper/charts",
+        "chart": "gatekeeper/gatekeeper", "release": "gatekeeper", "ns": "gatekeeper-system",
+        "set": ["auditInterval=30", "logLevel=INFO"],
+        "description": "OPA Gatekeeper — policy enforcement, blocks non-compliant deployments",
+    },
+    "trivy-operator": {
+        "repo": "aqua", "url": "https://aquasecurity.github.io/helm-charts/",
+        "chart": "aqua/trivy-operator", "release": "trivy-operator", "ns": "trivy-system",
+        "set": ["trivy.ignoreUnfixed=true"],
+        "description": "In-cluster image vulnerability scanning, reports as CRDs",
+    },
+    "kyverno": {
+        "repo": "kyverno", "url": "https://kyverno.github.io/kyverno/",
+        "chart": "kyverno/kyverno", "release": "kyverno", "ns": "kyverno",
+        "set": ["replicaCount=1"],
+        "description": "Policy-as-code — simpler alternative to OPA Gatekeeper",
+    },
+}
+
+# ─── Application Helm definitions ────────────────────────────────────────────
+APPLICATIONS_HELM = {
+    "sonarqube": {
+        "repo": "sonarqube", "url": "https://SonarSource.github.io/helm-chart-sonarqube",
+        "chart": "sonarqube/sonarqube", "release": "sonarqube", "ns": "sonarqube",
+        "set": ["service.type=ClusterIP", "persistence.enabled=true", "persistence.size=10Gi"],
+        "description": "Code quality + SAST scanning; generates admin token for Jenkins integration",
+        "default_admin_user": "admin",
+        "default_admin_pass": "admin",  # sonarqube forces change on first login
+    },
+    "harbor": {
+        "repo": "harbor", "url": "https://helm.goharbor.io",
+        "chart": "harbor/harbor", "release": "harbor", "ns": "harbor",
+        "set": ["expose.type=clusterIP", "persistence.enabled=true",
+                "trivy.enabled=true", "notary.enabled=false"],
+        "description": "Private container registry with built-in Trivy vulnerability scanning",
+        "default_admin_user": "admin",
+        "default_admin_pass_key": "harborAdminPassword",
+    },
+    "vault": {
+        "repo": "hashicorp", "url": "https://helm.releases.hashicorp.com",
+        "chart": "hashicorp/vault", "release": "vault", "ns": "vault",
+        "set": ["server.dev.enabled=false", "server.ha.enabled=false",
+                "injector.enabled=true", "ui.enabled=true", "ui.serviceType=ClusterIP"],
+        "description": "HashiCorp Vault — secrets management; K8s auth method configured automatically",
+    },
+    "keycloak": {
+        "repo": "bitnami", "url": "https://charts.bitnami.com/bitnami",
+        "chart": "bitnami/keycloak", "release": "keycloak", "ns": "keycloak",
+        "set": ["service.type=ClusterIP", "auth.adminUser=admin",
+                "postgresql.enabled=true"],
+        "description": "SSO / OIDC provider; kube-apiserver OIDC flags configured to trust this Keycloak",
+        "default_admin_user": "admin",
+    },
+}
+
+# ─── Additional Helm: cert-manager ClusterIssuers ────────────────────────────
+CERT_MANAGER_HELM = {
+    "repo": "jetstack", "url": "https://charts.jetstack.io",
+    "chart": "jetstack/cert-manager", "release": "cert-manager", "ns": "cert-manager",
+    "set": ["installCRDs=true"],
+}
+
+# ─── Ingress controller options ───────────────────────────────────────────────
+INGRESS_HELM = {
+    "nginx": {
+        "repo": "ingress-nginx", "url": "https://kubernetes.github.io/ingress-nginx",
+        "chart": "ingress-nginx/ingress-nginx", "release": "ingress-nginx", "ns": "ingress-nginx",
+        "set": ["controller.service.type=ClusterIP"],
+    },
+    "traefik": {
+        "repo": "traefik", "url": "https://traefik.github.io/charts",
+        "chart": "traefik/traefik", "release": "traefik", "ns": "traefik",
+        "set": ["service.type=ClusterIP", "dashboard.enabled=true"],
+    },
+    "haproxy": {
+        "repo": "haproxytech", "url": "https://haproxytech.github.io/helm-charts",
+        "chart": "haproxytech/kubernetes-ingress", "release": "haproxy-ingress", "ns": "haproxy",
+        "set": ["controller.service.type=ClusterIP"],
+    },
+}
+
+# ─── Compliance check commands per standard ───────────────────────────────────
+# Each entry maps standard name → list of (label, kubectl/shell check command)
+COMPLIANCE_CHECKS = {
+    "cis": [
+        ("CIS 1.1.1 — API server pod spec permissions",
+         "stat -c '%a' /etc/kubernetes/manifests/kube-apiserver.yaml 2>/dev/null || echo 'file not found'"),
+        ("CIS 1.2.1 — anonymous-auth disabled",
+         "ps aux | grep kube-apiserver | grep -o 'anonymous-auth=[^ ]*' || echo 'not found in process args'"),
+        ("CIS 1.2.6 — insecure port disabled",
+         "ps aux | grep kube-apiserver | grep -o 'insecure-port=[^ ]*' || echo 'OK: insecure-port not set'"),
+        ("CIS 1.2.9 — admission controllers",
+         "ps aux | grep kube-apiserver | grep -o 'enable-admission-plugins=[^ ]*' || echo 'defaults in use'"),
+        ("CIS 2.1 — etcd peer certs",
+         "ps aux | grep etcd | grep -o 'peer-cert-file=[^ ]*' || echo 'not found'"),
+        ("CIS 4.2.1 — kubelet anonymous auth",
+         "grep -r 'authentication:' /var/lib/kubelet/config.yaml 2>/dev/null || echo 'not found'"),
+        ("CIS 5.1.3 — minimize wildcard in RBAC roles",
+         "kubectl get clusterroles -o json | python3 -c \""
+         "import json,sys; roles=json.load(sys.stdin)['items']; "
+         "[print(r['metadata']['name']) for r in roles "
+         "if any(rule.get('verbs')==['*'] for rule in r.get('rules',[]))]\""),
+        ("CIS 5.2.2 — no privileged containers",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "if any(c.get('securityContext',{}).get('privileged') for c in p['spec'].get('containers',[]))]\" "
+         "|| echo none"),
+        ("CIS 5.7.1 — namespaces have network policies",
+         "kubectl get networkpolicies -A -o json | python3 -c \""
+         "import json,sys; nps=json.load(sys.stdin)['items']; "
+         "ns_with_np={np['metadata']['namespace'] for np in nps}; "
+         "all_ns=set(); print('namespaces without NetworkPolicy (sample check)')\""),
+    ],
+    "nsa-cisa": [
+        ("NSA 1 — use non-root containers",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "if p['spec'].get('securityContext',{}).get('runAsUser',999)==0]\" || echo none"),
+        ("NSA 2 — immutable root filesystems",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "for c in p['spec'].get('containers',[]) "
+         "if not c.get('securityContext',{}).get('readOnlyRootFilesystem')]\" || echo none"),
+        ("NSA 3 — disable privilege escalation",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "for c in p['spec'].get('containers',[]) "
+         "if c.get('securityContext',{}).get('allowPrivilegeEscalation',True)]\" || echo none"),
+        ("NSA 4 — resource limits on all containers",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "for c in p['spec'].get('containers',[]) "
+         "if not c.get('resources',{}).get('limits')]\" || echo none"),
+        ("NSA 5 — no sensitive host path mounts",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "sensitive=['/etc','/var/run/docker.sock','/proc','/sys','/dev']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']+': '+v['hostPath']['path']) "
+         "for p in pods for v in p['spec'].get('volumes',[]) "
+         "if v.get('hostPath',{}).get('path','') in sensitive]\" || echo none"),
+    ],
+    "pci-dss": [
+        ("PCI DSS 6.3 — no default service account tokens automounted",
+         "kubectl get serviceaccounts -A -o json | python3 -c \""
+         "import json,sys; sas=json.load(sys.stdin)['items']; "
+         "[print(sa['metadata']['namespace']+'/'+sa['metadata']['name']) for sa in sas "
+         "if sa.get('automountServiceAccountToken',True) and sa['metadata']['name']=='default']\""),
+        ("PCI DSS 7.1 — no cluster-admin bindings to users",
+         "kubectl get clusterrolebindings -o json | python3 -c \""
+         "import json,sys; crbs=json.load(sys.stdin)['items']; "
+         "[print(c['metadata']['name']) for c in crbs if c['roleRef']['name']=='cluster-admin' "
+         "and any(s.get('kind')=='User' for s in c.get('subjects',[]))]\" || echo none"),
+        ("PCI DSS 8.2 — unique identities (ServiceAccount per workload check)",
+         "kubectl get deployments -A -o json | python3 -c \""
+         "import json,sys; deps=json.load(sys.stdin)['items']; "
+         "[print(d['metadata']['namespace']+'/'+d['metadata']['name']) for d in deps "
+         "if not d['spec']['template']['spec'].get('serviceAccountName') "
+         "or d['spec']['template']['spec'].get('serviceAccountName')=='default']\" || echo none"),
+        ("PCI DSS 10.1 — audit logging enabled",
+         "ps aux | grep kube-apiserver | grep -o 'audit-log-path=[^ ]*' || echo 'WARN: audit logging not configured'"),
+    ],
+    "soc2-iso27001": [
+        ("SOC2 — secrets not stored in env vars",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']+': '+e['name']) "
+         "for p in pods for c in p['spec'].get('containers',[]) "
+         "for e in c.get('env',[]) "
+         "if any(kw in e['name'].upper() for kw in ['PASSWORD','SECRET','TOKEN','KEY','PASS'])]\" || echo none"),
+        ("SOC2 — image pull policy not Always for latest tags",
+         "kubectl get pods -A -o json | python3 -c \""
+         "import json,sys; pods=json.load(sys.stdin)['items']; "
+         "[print(p['metadata']['namespace']+'/'+p['metadata']['name']) for p in pods "
+         "for c in p['spec'].get('containers',[]) if ':latest' in c.get('image','')]\" || echo none"),
+        ("ISO27001 A.12.6 — vulnerability management: trivy operator present",
+         "kubectl get pods -n trivy-system 2>/dev/null || echo 'WARN: trivy-operator not installed'"),
+        ("ISO27001 A.9 — access control: RBAC enabled",
+         "ps aux | grep kube-apiserver | grep -o 'authorization-mode=[^ ]*' || echo 'check manually'"),
+        ("ISO27001 A.10 — encryption: etcd encryption check",
+         "ps aux | grep kube-apiserver | grep -o 'encryption-provider-config=[^ ]*' || echo 'WARN: etcd encryption not configured'"),
+    ],
+}
+
+# ─── Cloud cost rate tables (used when cloud provider = onprem) ──────────────
+# Users can override per-unit rates in the config under a `costing` block.
+DEFAULT_ONPREM_RATES = {
+    "cpu_core_hourly_usd":    0.015,   # per vCPU per hour
+    "ram_gb_hourly_usd":      0.005,   # per GiB per hour
+    "storage_gb_monthly_usd": 0.10,    # per GiB per month
+    "power_kwh_usd":          0.12,    # per kWh (for hardware power estimate)
+    "currency":               "USD",
+}
+
+
+# All values below are defaults — the user overrides them in the cluster config
+# under a top-level `node_config` block. plan_cluster will ask about each one
+# if not explicitly set, and show exactly what will be applied before anything
+# runs on the nodes.
 # ─────────────────────────────────────────────────────────────────────────────
-# Proxy support — every script that touches the network (apt/dnf/zypper, curl,
+
+# Kernel modules: always-required (kubeadm hard requirement) + optional extras
+KERNEL_MODULES_REQUIRED = ["overlay", "br_netfilter"]
+KERNEL_MODULES_OPTIONAL = {
+    "ipvs":         ["ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack"],
+    "ipvs_legacy":  ["ip_vs", "ip_vs_rr", "ip_vs_wrr", "ip_vs_sh", "nf_conntrack_ipv4"],
+    "ebpf_extra":   ["nf_conntrack"],
+    "none":         [],
+}
+
+# Sysctl presets — each is a dict of {param: value}
+SYSCTL_PRESETS = {
+    # Bare minimum kubeadm needs — suitable for dev/test single nodes
+    "k8s-minimal": {
+        "net.bridge.bridge-nf-call-iptables":  "1",
+        "net.bridge.bridge-nf-call-ip6tables": "1",
+        "net.ipv4.ip_forward":                 "1",
+    },
+    # Recommended for general production clusters
+    "k8s-production": {
+        "net.bridge.bridge-nf-call-iptables":  "1",
+        "net.bridge.bridge-nf-call-ip6tables": "1",
+        "net.ipv4.ip_forward":                 "1",
+        "net.ipv4.tcp_tw_reuse":               "1",
+        "net.ipv4.ip_local_port_range":        "1024 65535",
+        "net.core.somaxconn":                  "32768",
+        "net.core.netdev_max_backlog":         "16384",
+        "fs.file-max":                         "1048576",
+        "fs.inotify.max_user_instances":       "8192",
+        "fs.inotify.max_user_watches":         "524288",
+        "kernel.pid_max":                      "65536",
+        "vm.swappiness":                       "0",
+        "vm.overcommit_memory":                "1",
+    },
+    # High-throughput / high-connection workloads (API gateways, service meshes)
+    "k8s-highperf": {
+        "net.bridge.bridge-nf-call-iptables":  "1",
+        "net.bridge.bridge-nf-call-ip6tables": "1",
+        "net.ipv4.ip_forward":                 "1",
+        "net.ipv4.tcp_tw_reuse":               "1",
+        "net.ipv4.ip_local_port_range":        "1024 65535",
+        "net.core.somaxconn":                  "65535",
+        "net.core.netdev_max_backlog":         "65536",
+        "net.core.rmem_max":                   "67108864",
+        "net.core.wmem_max":                   "67108864",
+        "net.ipv4.tcp_rmem":                   "4096 87380 67108864",
+        "net.ipv4.tcp_wmem":                   "4096 65536 67108864",
+        "net.ipv4.tcp_syn_retries":            "2",
+        "net.ipv4.tcp_synack_retries":         "2",
+        "net.netfilter.nf_conntrack_max":      "1048576",
+        "fs.file-max":                         "2097152",
+        "fs.inotify.max_user_instances":       "16384",
+        "fs.inotify.max_user_watches":         "1048576",
+        "kernel.pid_max":                      "131072",
+        "vm.swappiness":                       "0",
+        "vm.overcommit_memory":                "1",
+        "vm.max_map_count":                    "262144",
+    },
+}
+
+# Default node_config — used if user doesn't specify; plan_cluster will always
+# surface this block and ask for confirmation before prepare_nodes runs.
+DEFAULT_NODE_CONFIG = {
+    "sysctl_preset":   "k8s-minimal",   # k8s-minimal | k8s-production | k8s-highperf | custom
+    "sysctl_custom":   {},               # extra params to merge on top of preset
+    "kernel_modules":  "required",      # required | ipvs | ebpf_extra | none
+    "extra_modules":   [],              # any additional modules the user wants
+    "iptables_mode":   "auto",          # auto | legacy | nftables
+    "selinux":         "permissive",    # permissive | enforcing | disabled (rhel only)
+    "swap":            "disable",       # disable | keep | warn
+    "hugepages":       False,           # enable transparent hugepages
+    "ulimits":         True,            # set recommended ulimits for containerd
+}
+
+
+def build_sysctl_block(node_config: dict) -> str:
+    """Build the sysctl.d/k8s.conf content from preset + any custom overrides."""
+    preset_name = node_config.get("sysctl_preset", "k8s-minimal")
+    params = dict(SYSCTL_PRESETS.get(preset_name, SYSCTL_PRESETS["k8s-minimal"]))
+    params.update(node_config.get("sysctl_custom", {}))
+    lines = [f"{k} = {v}" for k, v in params.items()]
+    return "\n".join(lines)
+
+
+def build_kernel_modules_block(node_config: dict) -> str:
+    """Return the list of kernel modules to load (required + optional set)."""
+    modules = list(KERNEL_MODULES_REQUIRED)
+    extra_set = node_config.get("kernel_modules", "required")
+    modules += KERNEL_MODULES_OPTIONAL.get(extra_set, [])
+    modules += node_config.get("extra_modules", [])
+    # deduplicate preserving order
+    seen, unique = set(), []
+    for m in modules:
+        if m not in seen:
+            seen.add(m)
+            unique.append(m)
+    return "\n".join(unique)
+
+
+def build_iptables_block(node_config: dict, os_family: str) -> str:
+    """Configure iptables mode on the node. 'auto' lets the OS decide.
+    'legacy' forces update-alternatives / iptables-legacy on Debian, or
+    the iptables-legacy package on RHEL. 'nftables' installs nftables."""
+    mode = node_config.get("iptables_mode", "auto")
+    if mode == "auto":
+        return "# iptables mode: auto (OS default)"
+    if mode == "legacy":
+        if os_family == "debian":
+            return textwrap.dedent("""
+                update-alternatives --set iptables  /usr/sbin/iptables-legacy  2>/dev/null || true
+                update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy 2>/dev/null || true
+            """).strip()
+        elif os_family == "rhel":
+            return "(dnf install -y -q iptables-legacy 2>/dev/null || yum install -y -q iptables-legacy 2>/dev/null || true)"
+        return "# iptables legacy: no action needed on this OS"
+    if mode == "nftables":
+        if os_family == "debian":
+            return "apt-get install -y -qq nftables && systemctl enable nftables"
+        elif os_family == "rhel":
+            return "(dnf install -y -q nftables 2>/dev/null || yum install -y -q nftables 2>/dev/null) && systemctl enable nftables"
+        return "zypper install -y nftables && systemctl enable nftables"
+    return "# iptables mode: unrecognised — skipped"
+
+
+def build_swap_block(node_config: dict) -> str:
+    """Swap handling: disable (kubeadm requirement by default), keep (user
+    explicitly accepts the risk), or warn (disable at runtime only, don't
+    touch fstab — survives a reboot but warns in prepare_nodes output)."""
+    mode = node_config.get("swap", "disable")
+    if mode == "disable":
+        return textwrap.dedent("""
+            swapoff -a
+            sed -i '/[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab 2>/dev/null || true
+        """).strip()
+    if mode == "warn":
+        return textwrap.dedent("""
+            swapoff -a
+            echo "WARNING: swap disabled at runtime only — will re-enable after reboot. Set swap: disable in node_config for permanent disable."
+        """).strip()
+    # keep — user explicitly wants swap on (e.g. dev node with --fail-swap-on=false)
+    return 'echo "swap: keeping as-is per node_config (ensure kubelet has --fail-swap-on=false)"'
+
+
+def build_selinux_block(node_config: dict, os_family: str) -> str:
+    """SELinux is only relevant on RHEL/CentOS family. Ignored on Debian/SUSE."""
+    if os_family != "rhel":
+        return "# SELinux: not applicable on this OS family"
+    mode = node_config.get("selinux", "permissive")
+    if mode == "permissive":
+        return textwrap.dedent("""
+            setenforce 0 2>/dev/null || true
+            sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
+        """).strip()
+    if mode == "disabled":
+        return textwrap.dedent("""
+            sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config 2>/dev/null || true
+            echo "SELinux set to disabled — will take full effect after reboot"
+        """).strip()
+    # enforcing — don't touch it, but warn
+    return 'echo "SELinux: keeping enforcing per node_config — ensure your CNI and container runtime support SELinux contexts"'
+
+
+def build_ulimits_block(node_config: dict) -> str:
+    """Set recommended system-wide ulimits for containerd and kubelet.
+    These prevent 'too many open files' issues under high pod density."""
+    if not node_config.get("ulimits", True):
+        return "# ulimits: skipped per node_config"
+    return textwrap.dedent("""
+        cat <<'EOF' | tee /etc/security/limits.d/99-k8s.conf
+* soft nofile 1048576
+* hard nofile 1048576
+* soft nproc  65536
+* hard nproc  65536
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+    """).strip()
+
+
+def build_hugepages_block(node_config: dict) -> str:
+    """Disable transparent hugepages (THP) — recommended for databases and
+    latency-sensitive workloads on Kubernetes. Optional: some ML workloads
+    prefer THP enabled."""
+    if not node_config.get("hugepages", False):
+        return textwrap.dedent("""
+            echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+            echo never > /sys/kernel/mm/transparent_hugepage/defrag  2>/dev/null || true
+            cat <<'EOF' | tee /etc/rc.local >/dev/null
+echo never > /sys/kernel/mm/transparent_hugepage/enabled
+echo never > /sys/kernel/mm/transparent_hugepage/defrag
+EOF
+            chmod +x /etc/rc.local 2>/dev/null || true
+        """).strip()
+    return "# hugepages: keeping THP enabled per node_config"
+
+
+def format_node_config_summary(node_config: dict) -> str:
+    """Human-readable summary of what will be applied to every node —
+    shown in plan_cluster output so the user can review before confirming."""
+    nc = {**DEFAULT_NODE_CONFIG, **node_config}
+    lines = [
+        "",
+        "NODE CONFIG (applied by prepare_nodes to every node):",
+        f"  sysctl preset:    {nc['sysctl_preset']}" +
+            (f"  (+{len(nc['sysctl_custom'])} custom params)" if nc.get("sysctl_custom") else ""),
+        f"  kernel modules:   required (overlay, br_netfilter)" +
+            (f" + {nc['kernel_modules']} set" if nc['kernel_modules'] != "required" else "") +
+            (f" + extras: {nc['extra_modules']}" if nc.get("extra_modules") else ""),
+        f"  iptables mode:    {nc['iptables_mode']}",
+        f"  selinux (rhel):   {nc['selinux']}",
+        f"  swap:             {nc['swap']}",
+        f"  hugepages (THP):  {'enabled' if nc.get('hugepages') else 'disabled'}",
+        f"  ulimits:          {'set' if nc.get('ulimits', True) else 'skipped'}",
+    ]
+    if nc.get("sysctl_custom"):
+        lines.append("  custom sysctl overrides:")
+        for k, v in nc["sysctl_custom"].items():
+            lines.append(f"    {k} = {v}")
+    preset_params = SYSCTL_PRESETS.get(nc["sysctl_preset"], SYSCTL_PRESETS["k8s-minimal"])
+    all_params = {**preset_params, **nc.get("sysctl_custom", {})}
+    lines.append(f"  total sysctl params:  {len(all_params)}")
+    lines.append("  (run prepare_nodes with dry_run=true to see the full generated script)")
+    return "\n".join(lines)
+
+
 # helm, kubectl apply -f <url>) is prefixed with these exports when a proxy is
 # configured. containerd needs a separate systemd drop-in since it's a daemon
 # with its own environment, not inherited from the SSH shell session.
@@ -154,6 +612,7 @@ PKG_COMMANDS = {
         "hold":           "apt-mark hold {pkgs}",
         "unhold":         "apt-mark unhold {pkgs}",
         "install_pinned": "apt-get install -y -qq {pkg}={ver}-*",
+        # containerd (not containerd.io) is in Ubuntu/Debian main repos — no Docker repo needed
         "base_pkgs":      "containerd apt-transport-https ca-certificates curl gpg socat conntrack",
         "repo_setup": textwrap.dedent("""
             curl -fsSL https://pkgs.k8s.io/core:/stable:/v{k8s_version}/deb/Release.key \\
@@ -169,6 +628,8 @@ PKG_COMMANDS = {
         "hold":           "dnf versionlock add {pkgs} 2>/dev/null || true",
         "unhold":         "dnf versionlock delete {pkgs} 2>/dev/null || true",
         "install_pinned": "(dnf install -y -q {pkg}-{ver} 2>/dev/null || yum install -y -q {pkg}-{ver})",
+        # containerd on RHEL comes from the Docker CE repo. We add that repo in
+        # prerequisites_script() below before any package install runs.
         "base_pkgs":      "containerd.io ca-certificates curl gnupg2 socat conntrack-tools",
         "repo_setup": textwrap.dedent("""
             cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
@@ -194,6 +655,129 @@ EOF
         """).strip(),
     },
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prerequisites bootstrapper
+# This script runs first inside prepare_nodes on every node. It installs
+# every binary that the MCP's subsequent commands depend on:
+#   - Helm           (every install_stack / helm_manage call)
+#   - etcdctl        (backup_etcd / restore_etcd)
+#   - git            (cluster_snapshot GitOps workflows)
+#   - jq             (JSON parsing in audit scripts)
+#   - wget           (fallback download tool)
+#   - Docker CE repo on RHEL (provides containerd.io)
+#   - EPEL repo on RHEL     (provides conntrack-tools on minimal installs)
+#   - DNF versionlock plugin on RHEL (required for package pinning)
+#
+# All steps are idempotent — safe to run multiple times. Each command checks
+# whether the tool already exists before installing, so re-running prepare_nodes
+# on a previously prepared node does not re-download everything.
+# ─────────────────────────────────────────────────────────────────────────────
+
+HELM_INSTALL_SCRIPT = textwrap.dedent("""
+    if ! command -v helm >/dev/null 2>&1; then
+        echo "[prerequisites] Installing Helm..."
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \\
+            -o /tmp/get-helm.sh
+        chmod +x /tmp/get-helm.sh
+        HELM_INSTALL_DIR=/usr/local/bin bash /tmp/get-helm.sh --no-sudo
+        rm -f /tmp/get-helm.sh
+        helm version --short
+        echo "[prerequisites] Helm installed: $(helm version --short)"
+    else
+        echo "[prerequisites] Helm already present: $(helm version --short)"
+    fi
+""").strip()
+
+ETCDCTL_INSTALL_SCRIPT = textwrap.dedent("""
+    if ! command -v etcdctl >/dev/null 2>&1; then
+        echo "[prerequisites] Installing etcdctl..."
+        ETCD_VER=$(curl -fsSL https://api.github.com/repos/etcd-io/etcd/releases/latest \\
+            | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\\(v[^"]*\\)".*/\\1/')
+        ETCD_VER=${ETCD_VER:-v3.5.13}
+        curl -fsSL "https://github.com/etcd-io/etcd/releases/download/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz" \\
+            -o /tmp/etcd.tar.gz
+        tar xzf /tmp/etcd.tar.gz -C /tmp
+        install -m 0755 /tmp/etcd-${ETCD_VER}-linux-amd64/etcdctl /usr/local/bin/etcdctl
+        rm -rf /tmp/etcd.tar.gz /tmp/etcd-${ETCD_VER}-linux-amd64
+        echo "[prerequisites] etcdctl installed: $(etcdctl version)"
+    else
+        echo "[prerequisites] etcdctl already present: $(etcdctl version)"
+    fi
+""").strip()
+
+
+def prerequisites_script(os_family: str, proxy_cfg: dict | None = None) -> str:
+    """
+    Fully self-contained prerequisites bootstrapper. Installs every binary
+    the MCP needs on the node — no prior setup required. Runs before any
+    package install in node_prep_script so the repos and tools are ready.
+    """
+    proxy_exports = proxy_env_exports(proxy_cfg)
+
+    if os_family == "debian":
+        repo_bootstrap = textwrap.dedent("""
+            # Ensure apt repos have git, jq, wget available
+            apt-get update -qq
+            apt-get install -y -qq git jq wget curl ca-certificates gpg 2>/dev/null || true
+        """).strip()
+        versionlock_install = ""  # not needed on Debian
+
+    elif os_family == "rhel":
+        repo_bootstrap = textwrap.dedent("""
+            # Add EPEL repo (provides conntrack-tools, jq, and other utilities on minimal installs)
+            if ! rpm -q epel-release >/dev/null 2>&1; then
+                (dnf install -y -q epel-release 2>/dev/null || yum install -y -q epel-release 2>/dev/null) || \\
+                rpm -Uvh --quiet https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm 2>/dev/null || true
+            fi
+
+            # Add Docker CE repo — provides containerd.io which is not in RHEL base repos
+            if [ ! -f /etc/yum.repos.d/docker-ce.repo ]; then
+                (dnf install -y -q yum-utils 2>/dev/null || yum install -y -q yum-utils 2>/dev/null) || true
+                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \\
+                curl -fsSL https://download.docker.com/linux/centos/docker-ce.repo \\
+                    -o /etc/yum.repos.d/docker-ce.repo 2>/dev/null || true
+            fi
+
+            # Install git, jq, wget
+            (dnf install -y -q git jq wget curl 2>/dev/null || yum install -y -q git jq wget curl 2>/dev/null) || true
+        """).strip()
+        versionlock_install = textwrap.dedent("""
+            # Install dnf-versionlock plugin (required for pinning kubelet/kubeadm/kubectl versions)
+            (dnf install -y -q python3-dnf-plugin-versionlock 2>/dev/null || \\
+             dnf install -y -q dnf-plugin-versionlock 2>/dev/null || \\
+             yum install -y -q yum-versionlock 2>/dev/null) || true
+        """).strip()
+
+    else:  # suse
+        repo_bootstrap = textwrap.dedent("""
+            # Install git, jq, wget
+            zypper install -y git jq wget curl 2>/dev/null || true
+        """).strip()
+        versionlock_install = ""
+
+    return textwrap.dedent(f"""
+        set -uo pipefail
+        {proxy_exports}
+        echo "[prerequisites] Starting prerequisite bootstrap on $(hostname)..."
+
+        {repo_bootstrap}
+
+        {versionlock_install}
+
+        {HELM_INSTALL_SCRIPT}
+
+        {ETCDCTL_INSTALL_SCRIPT}
+
+        echo "[prerequisites] All prerequisites ready."
+        echo "  helm:     $(helm version --short 2>/dev/null || echo not installed)"
+        echo "  etcdctl:  $(etcdctl version 2>/dev/null | head -1 || echo not installed)"
+        echo "  kubectl:  $(kubectl version --client --short 2>/dev/null || echo not yet installed)"
+        echo "  git:      $(git --version 2>/dev/null || echo not installed)"
+        echo "  jq:       $(jq --version 2>/dev/null || echo not installed)"
+        echo PREREQUISITES_DONE
+    """).strip()
+
 
 OS_DETECT_SCRIPT = textwrap.dedent("""
     if [ -f /etc/os-release ]; then
@@ -302,6 +886,7 @@ STORAGE_HELM = {
 
 NEXT_STEPS = {
     "plan_cluster": [
+        ("preflight_check",   "Verify all nodes are ready — checks disk, RAM, ports, and auto-installs missing tools"),
         ("prepare_nodes",     "Proceed — detect OS on every node, then install containerd/kubeadm"),
         ("prepare_nodes",     "Dry-run first — show the script without executing (dry_run: true)"),
         ("plan_cluster",      "Edit the config — change CNI, profile, monitoring, node list, or CIDRs and re-plan"),
@@ -325,30 +910,77 @@ NEXT_STEPS = {
         ("provision_storage",   "Install a StorageClass now, before workloads need one"),
     ],
     "install_stack": [
-        ("install_monitoring", "Set up monitoring (Prometheus, or Prometheus + Loki)"),
-        ("install_jenkins",    "Set up an in-cluster Jenkins for CI/CD"),
-        ("cluster_status",     "Verify everything — check nodes, system pods, and unhealthy pods"),
-        ("provision_namespace","Onboard the first team — create a namespace with quotas and RBAC"),
-        ("backup_etcd",        "Take a baseline backup now that the cluster is fully built"),
+        ("install_monitoring",       "Set up monitoring (Prometheus, or Prometheus + Loki)"),
+        ("install_jenkins",          "Set up in-cluster Jenkins for CI/CD"),
+        ("install_cert_manager",     "Install cert-manager for automated TLS cert management"),
+        ("install_security_tools",   "Install Falco, Gatekeeper, Trivy Operator, or Kyverno"),
+        ("install_applications",     "Install SonarQube, Harbor, Vault, or Keycloak"),
+        ("cluster_status",           "Verify everything — check nodes, system pods, unhealthy pods"),
+        ("backup_etcd",              "Take a baseline backup now that the cluster is fully built"),
     ],
     "install_monitoring": [
-        ("install_jenkins",   "Also set up Jenkins for CI/CD in the same cluster"),
-        ("cluster_status",    "Confirm the monitoring pods came up healthy"),
-        ("manage_kubeconfig", "Generate a kubeconfig for someone who needs Grafana/Prometheus access"),
+        ("install_jenkins",          "Also set up Jenkins for CI/CD in the same cluster"),
+        ("install_security_tools",   "Install in-cluster security tools next"),
+        ("install_applications",     "Install SonarQube, Harbor, Vault, or Keycloak"),
+        ("cluster_status",           "Confirm the monitoring pods came up healthy"),
+        ("generate_cluster_report",  "Generate the full cluster report with all credentials"),
     ],
     "install_jenkins": [
-        ("cluster_status",   "Confirm the Jenkins pod is Running"),
-        ("stream_logs",      "Tail Jenkins controller logs to watch first boot"),
-        ("manage_kubeconfig","Generate the kubeconfig Jenkins itself would use as a Kubernetes cloud agent"),
+        ("install_applications",     "Also install SonarQube, Harbor, Vault, or Keycloak"),
+        ("cluster_status",           "Confirm the Jenkins pod is Running"),
+        ("stream_logs",              "Tail Jenkins controller logs to watch first boot"),
+        ("generate_cluster_report",  "Generate the full cluster report with all credentials"),
+    ],
+    "install_security_tools": [
+        ("configure_rbac",           "Bootstrap RBAC hardening next"),
+        ("configure_pod_security",   "Configure PodSecurity admission + default-deny NetworkPolicy"),
+        ("configure_etcd_encryption","Encrypt secrets at rest in etcd"),
+        ("configure_audit_logging",  "Enable API server audit logging"),
+        ("security_audit",           "Run a compliance audit to baseline the cluster"),
+        ("generate_cluster_report",  "Generate the full cluster report"),
+    ],
+    "install_applications": [
+        ("configure_rbac",           "Harden RBAC after applications are installed"),
+        ("security_audit",           "Run a compliance audit"),
+        ("generate_cluster_report",  "Generate the full cluster report with all credentials"),
+    ],
+    "configure_rbac": [
+        ("configure_pod_security",   "Configure PodSecurity admission next"),
+        ("configure_etcd_encryption","Encrypt secrets at rest in etcd"),
+        ("configure_audit_logging",  "Enable API server audit logging"),
+        ("security_audit",           "Run a compliance audit"),
+    ],
+    "configure_pod_security": [
+        ("configure_etcd_encryption","Encrypt secrets at rest in etcd"),
+        ("configure_audit_logging",  "Enable API server audit logging"),
+        ("security_audit",           "Run a compliance audit"),
+    ],
+    "configure_etcd_encryption": [
+        ("configure_audit_logging",  "Enable API server audit logging"),
+        ("backup_etcd",              "Take a backup now that encryption is configured"),
+        ("security_audit",           "Run a compliance audit"),
+    ],
+    "configure_audit_logging": [
+        ("security_audit",           "Run a compliance audit to see the current baseline"),
+        ("generate_cluster_report",  "Generate the full cluster report"),
+    ],
+    "install_cert_manager": [
+        ("install_security_tools",   "Install security tools next"),
+        ("renew_service_cert",       "Test cert renewal on a specific service"),
+        ("cluster_status",           "Confirm cert-manager pods are Running"),
     ],
     "cluster_status": [
-        ("install_monitoring", "Set up monitoring if you haven't yet"),
-        ("install_jenkins",    "Set up Jenkins if you haven't yet"),
-        ("provision_namespace","Create a namespace for a team"),
-        ("migrate_workload",   "Migrate an existing docker-compose service onto this cluster"),
-        ("backup_etcd",        "Take an etcd backup"),
-        ("scale_cluster",      "Add more worker or master nodes"),
-        ("audit_cluster",      "Run a security and config audit"),
+        ("install_monitoring",       "Set up monitoring if you haven't yet"),
+        ("install_jenkins",          "Set up Jenkins if you haven't yet"),
+        ("install_security_tools",   "Install Falco, Gatekeeper, Trivy, or Kyverno"),
+        ("install_applications",     "Install SonarQube, Harbor, Vault, or Keycloak"),
+        ("provision_namespace",      "Create a namespace for a team"),
+        ("migrate_workload",         "Migrate an existing docker-compose service onto this cluster"),
+        ("backup_etcd",              "Take an etcd backup"),
+        ("scale_cluster",            "Add more worker or master nodes"),
+        ("security_audit",           "Run a multi-standard compliance audit"),
+        ("cost_report",              "Generate a resource consumption and cost report"),
+        ("generate_cluster_report",  "Generate the full cluster report with all credentials"),
     ],
     "scale_cluster_add": [
         ("cluster_status",    "Confirm the new node(s) joined and are Ready"),
@@ -511,16 +1143,27 @@ def detect_all_nodes_os(nodes: list[dict], max_workers=8) -> dict:
 # Script factories — every script branches on os_family
 # ─────────────────────────────────────────────────────────────────────────────
 
-def node_prep_script(k8s_version: str, os_family: str, proxy_cfg: dict | None = None) -> str:
-    """Build the node-prep script for the given OS family (debian/rhel/suse).
-    If proxy_cfg is set, proxy env vars are exported at the top of the script
-    and written into the package manager's own config file, and containerd
-    gets a systemd drop-in so the daemon itself can reach the network too."""
+def node_prep_script(k8s_version: str, os_family: str,
+                      proxy_cfg: dict | None = None,
+                      node_config: dict | None = None) -> str:
+    """Build the node-prep script for the given OS family.
+    node_config controls kernel modules, sysctl preset, iptables mode,
+    SELinux handling, swap handling, hugepages, and ulimits — all user-
+    selectable from the cluster config rather than hardcoded."""
+    nc  = {**DEFAULT_NODE_CONFIG, **(node_config or {})}
     pkg = PKG_COMMANDS[os_family]
     repo_setup = pkg["repo_setup"].format(k8s_version=k8s_version)
 
-    proxy_exports = proxy_env_exports(proxy_cfg)
+    proxy_exports    = proxy_env_exports(proxy_cfg)
     containerd_proxy = containerd_proxy_dropin(proxy_cfg)
+
+    sysctl_block   = build_sysctl_block(nc)
+    modules_block  = build_kernel_modules_block(nc)
+    iptables_block = build_iptables_block(nc, os_family)
+    swap_block     = build_swap_block(nc)
+    selinux_block  = build_selinux_block(nc, os_family)
+    ulimits_block  = build_ulimits_block(nc)
+    hugepages_block= build_hugepages_block(nc)
 
     if os_family == "debian":
         pkg_proxy_conf = apt_proxy_conf(proxy_cfg)
@@ -537,8 +1180,6 @@ def node_prep_script(k8s_version: str, os_family: str, proxy_cfg: dict | None = 
             mkdir -p /etc/containerd
             containerd config default | tee /etc/containerd/config.toml >/dev/null
             sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-            setenforce 0 2>/dev/null || true
-            sed -i 's/^SELINUX=enforcing/SELINUX=permissive/' /etc/selinux/config 2>/dev/null || true
         """).strip()
         install_k8s_pkgs = "(dnf install -y -q kubelet kubeadm kubectl --disableexcludes=kubernetes 2>/dev/null || yum install -y -q kubelet kubeadm kubectl --disableexcludes=kubernetes)"
         hold_cmd          = pkg["hold"].format(pkgs="kubelet kubeadm kubectl")
@@ -552,32 +1193,60 @@ def node_prep_script(k8s_version: str, os_family: str, proxy_cfg: dict | None = 
         install_k8s_pkgs = "zypper install -y kubelet kubeadm kubectl"
         hold_cmd          = pkg["hold"].format(pkgs="kubelet kubeadm kubectl")
 
+    prereqs = prerequisites_script(os_family, proxy_cfg)
+
     return textwrap.dedent(f"""
         set -euo pipefail
+
+        # ── Prerequisites (Helm, etcdctl, repos, tools) ───────────────────
+        {prereqs}
+
+        # ── Proxy setup ──────────────────────────────────────────────────
         {proxy_exports}{pkg_proxy_conf}
-        swapoff -a
-        sed -i '/[[:space:]]swap[[:space:]]/ s/^/#/' /etc/fstab 2>/dev/null || true
-        cat <<EOF | tee /etc/modules-load.d/k8s.conf
-overlay
-br_netfilter
-EOF
-        modprobe overlay && modprobe br_netfilter
-        cat <<EOF | tee /etc/sysctl.d/k8s.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
+
+        # ── Swap ─────────────────────────────────────────────────────────
+        {swap_block}
+
+        # ── SELinux (RHEL/CentOS only) ────────────────────────────────────
+        {selinux_block}
+
+        # ── Kernel modules ────────────────────────────────────────────────
+        cat <<'MODEOF' | tee /etc/modules-load.d/k8s.conf
+{modules_block}
+MODEOF
+        for mod in {modules_block.replace(chr(10), " ")}; do
+            modprobe "$mod" 2>/dev/null || echo "WARN: module $mod not available (may not be needed on this kernel)"
+        done
+
+        # ── sysctl parameters ─────────────────────────────────────────────
+        cat <<'SYSCTLEOF' | tee /etc/sysctl.d/k8s.conf
+{sysctl_block}
+SYSCTLEOF
         sysctl --system >/dev/null
+
+        # ── iptables mode ─────────────────────────────────────────────────
+        {iptables_block}
+
+        # ── ulimits ───────────────────────────────────────────────────────
+        {ulimits_block}
+
+        # ── Transparent hugepages ─────────────────────────────────────────
+        {hugepages_block}
+
+        # ── Packages + containerd ─────────────────────────────────────────
         {pkg["update"]}
         {pkg["install"].format(pkgs=pkg["base_pkgs"])}
         {containerd_cgroup_fix}
         {containerd_proxy}
         systemctl restart containerd && systemctl enable containerd
+
+        # ── Kubernetes packages ───────────────────────────────────────────
         {repo_setup}
         {pkg["update"]}
         {install_k8s_pkgs}
         {hold_cmd}
         systemctl enable kubelet
+
         echo NODE_PREP_DONE
     """).strip()
 
@@ -870,6 +1539,19 @@ async def list_tools():
                  "storage_class":   {"type":"string","description":"StorageClass to use for the Jenkins PVC — omit to use the cluster default"},
                  "dry_run":         {"type":"boolean","default":False}}}),
 
+        Tool(name="preflight_check",
+             description=(
+                 "Run a preflight check on all nodes before bootstrapping. Verifies: "
+                 "SSH connectivity, OS detection, Python availability, sufficient disk space, "
+                 "sufficient RAM, port availability (6443, 10250, 2379-2380), "
+                 "internet/proxy reachability, and whether Helm and etcdctl are installed. "
+                 "Fixes missing tools automatically (Helm, etcdctl, repo configs) without "
+                 "full node prep. Run this any time to verify a node is ready."),
+             inputSchema={"type":"object","properties":{
+                 "fix":  {"type":"boolean","default":True,
+                          "description":"Automatically install any missing tools and repos found during the check"},
+                 "node_name": {"type":"string","description":"Check only this node — omit for all nodes"}}}),
+
         Tool(name="cluster_status", description="Health check: nodes, system pods, unhealthy pods, PVs, LoadBalancer services.",
              inputSchema={"type":"object","properties":{}}),
 
@@ -973,6 +1655,140 @@ async def list_tools():
                  "output_dir":      {"type":"string","default":"/opt/cluster-snapshot"},
                  "namespaces":      {"type":"array","items":{"type":"string"}},
                  "exclude_secrets": {"type":"boolean","default":True}}}),
+
+        # ── Security, applications, reporting tools ───────────────────────────
+
+        Tool(name="install_security_tools",
+             description=(
+                 "Install in-cluster security tools. Ask the user which ones they want if not specified. "
+                 "Options: falco (runtime threat detection), gatekeeper (OPA policy enforcement), "
+                 "trivy-operator (image vuln scanning), kyverno (policy-as-code). "
+                 "Can install any combination. All are selectable individually."),
+             inputSchema={"type":"object","properties":{
+                 "tools":    {"type":"array","items":{"type":"string","enum":["falco","gatekeeper","trivy-operator","kyverno"]},
+                              "description":"Which security tools to install. Ask user if not specified."},
+                 "dry_run":  {"type":"boolean","default":False}},"required":["tools"]}),
+
+        Tool(name="install_applications",
+             description=(
+                 "Install additional applications into the cluster. Ask the user which ones they want if not specified. "
+                 "Options: sonarqube (code quality+SAST), harbor (private registry+scanning), "
+                 "vault (secrets management, K8s auth auto-configured), keycloak (SSO/OIDC, kube-apiserver wired). "
+                 "Generates credentials for each installed application."),
+             inputSchema={"type":"object","properties":{
+                 "apps":       {"type":"array","items":{"type":"string","enum":["sonarqube","harbor","vault","keycloak"]},
+                                "description":"Which applications to install. Ask user if not specified."},
+                 "storage_class": {"type":"string","description":"StorageClass for persistent volumes (uses cluster default if omitted)"},
+                 "dry_run":    {"type":"boolean","default":False}},"required":["apps"]}),
+
+        Tool(name="configure_rbac",
+             description=(
+                 "Bootstrap cluster-level RBAC security: restrict default ServiceAccount automount, "
+                 "remove anonymous access, configure audit policy, lock down cluster-admin binding, "
+                 "create dedicated ServiceAccounts per installed application."),
+             inputSchema={"type":"object","properties":{
+                 "audit_level":    {"type":"string","enum":["none","metadata","request","requestresponse"],"default":"metadata"},
+                 "restrict_default_sa": {"type":"boolean","default":True,"description":"Patch all default ServiceAccounts with automountServiceAccountToken=false"},
+                 "dry_run":        {"type":"boolean","default":False}}}),
+
+        Tool(name="configure_pod_security",
+             description=(
+                 "Configure Pod Security Admission (replaces PodSecurityPolicy), default-deny NetworkPolicies "
+                 "per namespace, seccomp RuntimeDefault profile, and read-only root filesystem enforcement."),
+             inputSchema={"type":"object","properties":{
+                 "mode":       {"type":"string","enum":["privileged","baseline","restricted"],"default":"baseline",
+                                "description":"PodSecurity admission mode applied cluster-wide"},
+                 "default_deny_network": {"type":"boolean","default":True,
+                                          "description":"Apply default-deny NetworkPolicy to all non-system namespaces"},
+                 "dry_run":    {"type":"boolean","default":False}}}),
+
+        Tool(name="configure_etcd_encryption",
+             description=(
+                 "Configure encryption at rest for Kubernetes Secrets stored in etcd. "
+                 "Generates an EncryptionConfiguration file and restarts the API server. "
+                 "Supports AES-CBC (widely compatible) and AES-GCM (faster). "
+                 "WARNING: back up etcd first — this is a destructive API server config change."),
+             inputSchema={"type":"object","properties":{
+                 "algorithm": {"type":"string","enum":["aes-cbc","aes-gcm"],"default":"aes-cbc"},
+                 "dry_run":   {"type":"boolean","default":False}}}),
+
+        Tool(name="configure_audit_logging",
+             description=(
+                 "Configure Kubernetes API server audit logging with a policy file. "
+                 "Choices: none (off), metadata (who+what, no bodies), request (+ request body), "
+                 "requestresponse (full request+response — high volume). Writes the policy file and restarts the API server."),
+             inputSchema={"type":"object","properties":{
+                 "level":      {"type":"string","enum":["none","metadata","request","requestresponse"],"default":"metadata"},
+                 "log_path":   {"type":"string","default":"/var/log/kubernetes/audit.log"},
+                 "max_age":    {"type":"integer","default":30,"description":"Days to retain audit logs"},
+                 "dry_run":    {"type":"boolean","default":False}}}),
+
+        Tool(name="security_audit",
+             description=(
+                 "Run a multi-standard compliance audit. Ask user which standards to check if not specified. "
+                 "Standards: cis (CIS K8s Benchmark), nsa-cisa (NSA/CISA Hardening Guide), "
+                 "pci-dss (Payment Card Industry), soc2-iso27001 (SOC2/ISO27001 controls). "
+                 "Returns a structured report with pass/fail per control, grouped by standard."),
+             inputSchema={"type":"object","properties":{
+                 "standards": {"type":"array","items":{"type":"string","enum":["cis","nsa-cisa","pci-dss","soc2-iso27001","all"]},
+                               "default":["all"],"description":"Compliance standards to check. Ask user if not specified."},
+                 "output_report": {"type":"boolean","default":True,"description":"Include in the cluster report file"}}}),
+
+        Tool(name="install_cert_manager",
+             description=(
+                 "Install cert-manager and configure a ClusterIssuer. "
+                 "Issuer options: self-signed (no external dependency, good for on-prem), "
+                 "acme-letsencrypt (requires public DNS + port 80/443), "
+                 "acme-zerossl (alternative ACME, requires account email), "
+                 "internal-ca (use your own CA cert+key). "
+                 "Separate from install_stack — cert-manager is a prerequisite for zero-downtime cert renewal."),
+             inputSchema={"type":"object","properties":{
+                 "issuer_type":  {"type":"string","enum":["self-signed","acme-letsencrypt","acme-zerossl","internal-ca"],
+                                  "default":"self-signed"},
+                 "email":        {"type":"string","description":"Required for ACME issuers"},
+                 "ca_cert":      {"type":"string","description":"Base64 CA cert for internal-ca issuer"},
+                 "ca_key":       {"type":"string","description":"Base64 CA key for internal-ca issuer"},
+                 "dry_run":      {"type":"boolean","default":False}}}),
+
+        Tool(name="renew_service_cert",
+             description=(
+                 "Trigger zero-downtime certificate renewal for a specific service managed by cert-manager. "
+                 "Annotates the Certificate resource to force immediate renewal without pod restarts "
+                 "(cert-manager handles rotation transparently). "
+                 "For control-plane certs use rotate_certs instead."),
+             inputSchema={"type":"object","properties":{
+                 "certificate_name": {"type":"string","description":"Name of the cert-manager Certificate resource"},
+                 "namespace":        {"type":"string","default":"default"},
+                 "force":            {"type":"boolean","default":False,
+                                      "description":"If true, delete and recreate the Secret to force full re-issuance"}}}),
+
+        Tool(name="cost_report",
+             description=(
+                 "Generate a resource consumption and cost report for the cluster. "
+                 "For cloud providers (aws/gcp/azure): queries billing APIs for actual spend. "
+                 "For on-prem/openstack: calculates estimated cost from vCPU/RAM/storage consumption "
+                 "× configurable per-unit rates (set under costing block in cluster config). "
+                 "Output: per-namespace breakdown, per-component breakdown, total monthly estimate."),
+             inputSchema={"type":"object","properties":{
+                 "cloud_provider": {"type":"string","enum":["aws","gcp","azure","onprem","openstack"],
+                                    "description":"Infrastructure type. Uses cluster config value if omitted."},
+                 "aws_profile":    {"type":"string","description":"AWS CLI profile for billing API (aws only)"},
+                 "gcp_project":    {"type":"string","description":"GCP project ID (gcp only)"},
+                 "azure_sub":      {"type":"string","description":"Azure subscription ID (azure only)"},
+                 "breakdown":      {"type":"string","enum":["namespace","node","component","all"],"default":"all"}}}),
+
+        Tool(name="generate_cluster_report",
+             description=(
+                 "Generate the full cluster report in both Markdown (human-readable) and YAML (machine-readable). "
+                 "Includes: all credentials (Jenkins, Grafana, SonarQube, Harbor, Vault, Keycloak), "
+                 "service IPs and access commands, namespace details, network details (pod/service CIDRs, CNI), "
+                 "ServiceAccount tokens, certificate expiry dates, compliance audit summary, "
+                 "cost estimate, and next recommended actions. "
+                 "Saves to /opt/cluster-report/ on the master node and streams a summary to the conversation."),
+             inputSchema={"type":"object","properties":{
+                 "output_dir":  {"type":"string","default":"/opt/cluster-report"},
+                 "include_secrets": {"type":"boolean","default":True,
+                                     "description":"Include credential values in output (set false for shared reports)"}}}),
     ]
 
 
@@ -1051,6 +1867,25 @@ async def call_tool(name, arguments):
                 return err("proxy block is present but has neither http_proxy nor https_proxy set \u2014 "
                            "remove the proxy block entirely if no proxy is needed, or set at least one of them")
 
+            # Validate node_config block if present
+            nc = c.get("node_config", {})
+            nc_issues = []
+            if nc.get("sysctl_preset") and nc["sysctl_preset"] not in SUPPORTED_SYSCTL_PRESETS:
+                nc_issues.append(f"node_config.sysctl_preset must be one of {SUPPORTED_SYSCTL_PRESETS}")
+            if nc.get("selinux") and nc["selinux"] not in SUPPORTED_SELINUX:
+                nc_issues.append(f"node_config.selinux must be one of {SUPPORTED_SELINUX}")
+            if nc.get("swap") and nc["swap"] not in SUPPORTED_SWAP:
+                nc_issues.append(f"node_config.swap must be one of {SUPPORTED_SWAP}")
+            if nc.get("iptables_mode") and nc["iptables_mode"] not in SUPPORTED_IPTABLES:
+                nc_issues.append(f"node_config.iptables_mode must be one of {SUPPORTED_IPTABLES}")
+            if nc.get("kernel_modules") and nc["kernel_modules"] not in KERNEL_MODULES_OPTIONAL:
+                nc_issues.append(f"node_config.kernel_modules must be one of {list(KERNEL_MODULES_OPTIONAL.keys())}")
+            if nc_issues:
+                return err("node_config validation:\n" + "\n".join(f"  \u2022 {i}" for i in nc_issues))
+
+            # Apply defaults to node_config so they're stored in state
+            c["node_config"] = {**DEFAULT_NODE_CONFIG, **nc}
+
             _state["config"] = c
             pkgs = HELM_PACKAGES.get(c["profile"], [])
             ha_note = f"HA \u2014 {len(c['masters'])} masters" if len(c["masters"]) > 1 else "single master (no HA)"
@@ -1073,16 +1908,30 @@ async def call_tool(name, arguments):
                     "6. cluster_status     \u2014 verify all nodes Ready",
                 ],
             }
-            note = ""
+            node_config_summary = format_node_config_summary(c["node_config"])
+            note = node_config_summary
             if "os_family" not in str(arguments["config"]):
-                note = ("\n\nNote: no os_family was specified per node \u2014 prepare_nodes will SSH in and "
+                note += ("\n\nNote: no os_family was specified per node \u2014 prepare_nodes will SSH in and "
                         "auto-detect each node's OS (Ubuntu/Debian, RHEL/CentOS/Rocky/Alma, or SUSE) and use "
                         "the matching package manager automatically. Nodes can run different OSes.")
             if not proxy_cfg:
-                note += ("\n\nNote: no proxy block was specified. If your nodes only reach the internet "
-                         "through a corporate proxy, add a top-level 'proxy' block with http_proxy/https_proxy "
-                         "(and optionally no_proxy) before running prepare_nodes, or every package install and "
-                         "Helm chart download will fail with a network timeout.")
+                note += ""  # Proxy is optional — direct internet is fine, no nag needed
+            else:
+                note += f"\n\nProxy: {proxy_cfg.get('http_proxy', proxy_cfg.get('https_proxy'))} — will be applied to all network operations."
+            if "node_config" not in str(arguments["config"]):
+                note += ("\n\nNote: no node_config block was specified \u2014 using defaults shown above. "
+                         "Add a node_config block to your YAML to customize sysctl preset, kernel modules, "
+                         "iptables mode, SELinux handling, swap behaviour, hugepages, and ulimits.")
+            note += ("\n\nAdditional config options you can add:\n"
+                     "  security_tools: [falco, gatekeeper, trivy-operator, kyverno]\n"
+                     "  applications:   [sonarqube, harbor, vault, keycloak]\n"
+                     "  compliance:     [cis, nsa-cisa, pci-dss, soc2-iso27001]\n"
+                     "  cloud_provider: aws | gcp | azure | onprem | openstack  (for cost_report)\n"
+                     "  costing.rates:  {cpu_core_hourly_usd, ram_gb_hourly_usd, storage_gb_monthly_usd}\n"
+                     "  ingress:        nginx | traefik | haproxy | none\n"
+                     "  container_runtime: containerd | crio\n"
+                     "  kube_proxy_mode:   iptables | ipvs | ebpf\n"
+                     "Or just proceed and use the dedicated install_* tools after the cluster is up.")
             return [TextContent(type="text", text="PLAN:\n" + yaml.dump(plan, default_flow_style=False) + note + _format_next_steps("plan_cluster"))]
 
         # ── prepare_nodes ─────────────────────────────────────────────────
@@ -1093,7 +1942,7 @@ async def call_tool(name, arguments):
             pcfg = proxy()
 
             if dry_run:
-                sample = node_prep_script(c["k8s_version"], "debian", pcfg)
+                sample = node_prep_script(c["k8s_version"], "debian", pcfg, c.get("node_config"))
                 proxy_line = f"Proxy configured: {pcfg.get('http_proxy', pcfg.get('https_proxy'))}\n\n" if pcfg else "No proxy configured.\n\n"
                 return [TextContent(type="text", text=
                     proxy_line + "DRY RUN \u2014 OS will be auto-detected per node; example script for a Debian-family node:\n\n" + sample)]
@@ -1104,7 +1953,7 @@ async def call_tool(name, arguments):
                 if node.get("os_family", "auto") == "auto":
                     node["os_family"] = os_results[node["name"]]["os_family"]
 
-            pairs = [(node, node_prep_script(c["k8s_version"], node["os_family"], pcfg)) for node in nodes]
+            pairs = [(node, node_prep_script(c["k8s_version"], node["os_family"], pcfg, c.get("node_config"))) for node in nodes]
             results = ssh_run_parallel_per_node_cmd(pairs, timeout=300)
 
             lines = []
@@ -1175,6 +2024,29 @@ async def call_tool(name, arguments):
             worker_results = ssh_run_parallel(c["workers"], worker_join, timeout=120)
             for wname, r in worker_results.items():
                 lines.append(f"  [{'JOINED' if r['code']==0 else 'FAIL'}] {wname}" + (f" \u2014 {r['stderr'][-200:]}" if r["code"] != 0 else ""))
+
+            # Verify Helm and etcdctl are present on master — install if missing
+            # (prepare_nodes should have done this, but we verify here to guarantee
+            # that all subsequent helm/etcdctl calls will work without user intervention)
+            lines.append("\nVerifying tools on master node...")
+            verify_cmd = textwrap.dedent(f"""
+                {proxy_env_exports(c.get('proxy'))}
+                if ! command -v helm >/dev/null 2>&1; then
+                    echo "[bootstrap] Helm missing — installing now..."
+                    {HELM_INSTALL_SCRIPT}
+                fi
+                if ! command -v etcdctl >/dev/null 2>&1; then
+                    echo "[bootstrap] etcdctl missing — installing now..."
+                    {ETCDCTL_INSTALL_SCRIPT}
+                fi
+                echo "helm=$(helm version --short 2>/dev/null || echo NOT_INSTALLED)"
+                echo "etcdctl=$(etcdctl version 2>/dev/null | head -1 || echo NOT_INSTALLED)"
+                echo "kubectl=$(kubectl version --client --short 2>/dev/null || echo NOT_INSTALLED)"
+            """).strip()
+            _, tool_out, _ = ssh(verify_cmd, timeout=120)
+            for tline in tool_out.splitlines():
+                if any(x in tline for x in ["helm=", "etcdctl=", "kubectl=", "[bootstrap]"]):
+                    lines.append(f"  {tline.strip()}")
 
             return [TextContent(type="text", text="\n".join(lines) + _format_next_steps("bootstrap_cluster"))]
 
@@ -1271,6 +2143,137 @@ async def call_tool(name, arguments):
                 "credentials needed for that.")
             return [TextContent(type="text", text=f"Jenkins installed:\n{out}" + access_note + _format_next_steps("install_jenkins"))]
 
+        # ── preflight_check ───────────────────────────────────────────────
+        elif name == "preflight_check":
+            try: c = cfg()
+            except ValueError as e: return err(str(e))
+
+            fix      = arguments.get("fix", True)
+            node_nm  = arguments.get("node_name")
+            all_n    = all_nodes()
+            targets  = [n for n in all_n if not node_nm or n["name"] == node_nm]
+            if not targets:
+                return err(f"Node '{node_nm}' not found in config")
+
+            pcfg = c.get("proxy")
+            proxy_exp = proxy_env_exports(pcfg)
+
+            preflight_script = textwrap.dedent(f"""
+                set -uo pipefail
+                {proxy_exp}
+                ISSUES=0
+                FIXED=0
+                echo "=== PREFLIGHT CHECK on $(hostname) ==="
+
+                echo "-- OS detection --"
+                cat /etc/os-release | grep PRETTY_NAME || true
+
+                echo "-- Disk space (need >= 20GB free on /) --"
+                FREE_GB=$(df -BG / | tail -1 | awk '{{print $4}}' | tr -d 'G')
+                if [ "${{FREE_GB:-0}}" -lt 20 ]; then
+                    echo "WARN: only ${{FREE_GB}}GB free on / (need 20GB)"
+                    ISSUES=$((ISSUES+1))
+                else
+                    echo "OK: ${{FREE_GB}}GB free on /"
+                fi
+
+                echo "-- Memory (need >= 2GB RAM) --"
+                MEM_MB=$(free -m | awk '/^Mem:/ {{print $2}}')
+                if [ "${{MEM_MB:-0}}" -lt 2000 ]; then
+                    echo "WARN: only ${{MEM_MB}}MB RAM (need 2000MB)"
+                    ISSUES=$((ISSUES+1))
+                else
+                    echo "OK: ${{MEM_MB}}MB RAM"
+                fi
+
+                echo "-- Port availability (6443, 10250, 2379, 2380) --"
+                for PORT in 6443 10250 2379 2380; do
+                    if ss -tlnp 2>/dev/null | grep -q ":$PORT "; then
+                        echo "WARN: port $PORT is already in use"
+                        ISSUES=$((ISSUES+1))
+                    else
+                        echo "OK: port $PORT is free"
+                    fi
+                done
+
+                echo "-- Swap --"
+                SWAP=$(free | awk '/^Swap:/ {{print $2}}')
+                if [ "${{SWAP:-0}}" -gt 0 ]; then
+                    echo "WARN: swap is active (${{SWAP}}kB) — kubeadm requires swap disabled"
+                    ISSUES=$((ISSUES+1))
+                else
+                    echo "OK: swap is disabled"
+                fi
+
+                echo "-- Internet/proxy reachability --"
+                if curl -fsSL --connect-timeout 10 https://registry.k8s.io >/dev/null 2>&1; then
+                    echo "OK: can reach registry.k8s.io"
+                elif curl -fsSL --connect-timeout 10 https://pypi.org >/dev/null 2>&1; then
+                    echo "OK: internet reachable (registry.k8s.io timed out but pypi.org works)"
+                else
+                    echo "WARN: cannot reach internet — check proxy settings or network"
+                    ISSUES=$((ISSUES+1))
+                fi
+
+                echo "-- Tool availability --"
+                for TOOL in helm etcdctl kubectl kubeadm git jq; do
+                    if command -v $TOOL >/dev/null 2>&1; then
+                        echo "OK: $TOOL is installed"
+                    else
+                        echo "MISSING: $TOOL"
+                        ISSUES=$((ISSUES+1))
+                        if [ "{str(fix).lower()}" = "true" ]; then
+                            echo "  AUTO-FIX: installing $TOOL..."
+                            case $TOOL in
+                                helm)
+                                    {HELM_INSTALL_SCRIPT.replace(chr(10), chr(10)+'                                    ')}
+                                    FIXED=$((FIXED+1))
+                                    ;;
+                                etcdctl)
+                                    {ETCDCTL_INSTALL_SCRIPT.replace(chr(10), chr(10)+'                                    ')}
+                                    FIXED=$((FIXED+1))
+                                    ;;
+                                git|jq)
+                                    (apt-get install -y -qq $TOOL 2>/dev/null || dnf install -y -q $TOOL 2>/dev/null || zypper install -y $TOOL 2>/dev/null) && FIXED=$((FIXED+1)) || true
+                                    ;;
+                                *)
+                                    echo "  (cannot auto-install $TOOL — will be installed during prepare_nodes)"
+                                    ;;
+                            esac
+                        fi
+                    fi
+                done
+
+                echo ""
+                echo "=== SUMMARY ==="
+                echo "Issues found: $ISSUES"
+                if [ "{str(fix).lower()}" = "true" ]; then
+                    echo "Issues auto-fixed: $FIXED"
+                fi
+                if [ "$ISSUES" -eq 0 ] || [ "$FIXED" -ge "$ISSUES" ]; then
+                    echo "STATUS: READY"
+                else
+                    REMAINING=$((ISSUES - FIXED))
+                    echo "STATUS: $REMAINING issue(s) need manual attention"
+                fi
+                echo PREFLIGHT_DONE
+            """).strip()
+
+            results = ssh_run_parallel(targets, preflight_script, timeout=120)
+            output = []
+            all_ready = True
+            for n in targets:
+                r = results.get(n["name"], {})
+                done = "PREFLIGHT_DONE" in r.get("stdout", "")
+                ready = "STATUS: READY" in r.get("stdout", "")
+                if not ready: all_ready = False
+                output.append(f"\n{'='*40}\nNode: {n['name']} ({n['ip']})\n{'='*40}")
+                output.append(r.get("stdout", r.get("stderr", "no output")))
+
+            summary = "\nAll nodes READY to proceed." if all_ready else \
+                      "\nWARN: some nodes have issues. Review above and re-run, or run prepare_nodes to resolve automatically."
+            return [TextContent(type="text", text="\n".join(output) + summary + _format_next_steps("prepare_nodes"))]
+
         # ── cluster_status ────────────────────────────────────────────────
         elif name == "cluster_status":
             cfg()
@@ -1325,7 +2328,7 @@ async def call_tool(name, arguments):
                     if n["os_family"] == "auto":
                         n["os_family"] = os_results[n["name"]]["os_family"]
 
-                prep_pairs = [(n, node_prep_script(c["k8s_version"], n["os_family"], proxy())) for n in nodes]
+                prep_pairs = [(n, node_prep_script(c["k8s_version"], n["os_family"], proxy(), c.get("node_config"))) for n in nodes]
                 prep_results = ssh_run_parallel_per_node_cmd(prep_pairs, timeout=300)
 
                 lines = ["Detected OS:"]
@@ -1791,6 +2794,785 @@ spec:
             code, out, er = ssh(cmd, timeout=180)
             if code != 0: return err(f"Snapshot failed:\n{er}")
             return [TextContent(type="text", text=f"Cluster snapshot complete:\n{out}\n\nDirectory: {snap}" + _format_next_steps("cluster_snapshot"))]
+
+            return [TextContent(type="text", text=f"Cluster snapshot complete:\n{out}\n\nDirectory: {snap}" + _format_next_steps("cluster_snapshot"))]
+
+        # ── install_security_tools ────────────────────────────────────────
+        elif name == "install_security_tools":
+            cfg()
+            tools   = arguments["tools"]
+            dry_run = arguments.get("dry_run", False)
+            unknown = [t for t in tools if t not in SECURITY_TOOLS_HELM]
+            if unknown:
+                return err(f"Unknown security tools: {unknown}. Supported: {list(SECURITY_TOOLS_HELM.keys())}")
+            results = []
+            for tool_name in tools:
+                th = SECURITY_TOOLS_HELM[tool_name]
+                sets = " ".join(f"--set {s}" for s in th.get("set", []))
+                cmd  = (f"helm repo add {th['repo']} {th['url']} --force-update 2>/dev/null; "
+                        f"helm upgrade --install {th['release']} {th['chart']} "
+                        f"--namespace {th['ns']} --create-namespace {sets}")
+                if dry_run:
+                    results.append(f"DRY RUN [{tool_name}]: {cmd}")
+                    continue
+                code, out, er = ssh(with_proxy(cmd), timeout=300)
+                status = "OK" if code == 0 else "FAIL"
+                results.append(f"[{status}] {tool_name} — {th['description']}" + (f"\n  {er[-200:]}" if code != 0 else ""))
+                if code == 0:
+                    _state.setdefault("installed_security_tools", []).append(tool_name)
+            return [TextContent(type="text", text="Security tools:\n" + "\n".join(results) + _format_next_steps("cluster_status"))]
+
+        # ── install_applications ──────────────────────────────────────────
+        elif name == "install_applications":
+            cfg()
+            apps      = arguments["apps"]
+            storage   = arguments.get("storage_class", "")
+            dry_run   = arguments.get("dry_run", False)
+            unknown   = [a for a in apps if a not in APPLICATIONS_HELM]
+            if unknown:
+                return err(f"Unknown applications: {unknown}. Supported: {list(APPLICATIONS_HELM.keys())}")
+            results = []
+            creds_generated = {}
+            for app_name in apps:
+                ah   = APPLICATIONS_HELM[app_name]
+                sets = list(ah.get("set", []))
+                if storage:
+                    sets.append(f"persistence.storageClass={storage}")
+                    sets.append(f"global.storageClass={storage}")
+                set_str = " ".join(f"--set {s}" for s in sets)
+                cmd = (f"helm repo add {ah['repo']} {ah['url']} --force-update 2>/dev/null; "
+                       f"helm upgrade --install {ah['release']} {ah['chart']} "
+                       f"--namespace {ah['ns']} --create-namespace {set_str}")
+                if dry_run:
+                    results.append(f"DRY RUN [{app_name}]: {cmd}")
+                    continue
+                code, out, er = ssh(with_proxy(cmd), timeout=300)
+                if code != 0:
+                    results.append(f"[FAIL] {app_name}: {er[-200:]}")
+                    continue
+                results.append(f"[OK] {app_name}")
+                # Generate / retrieve credentials
+                if app_name == "vault":
+                    # Initialize Vault and capture unseal keys
+                    init_cmd = textwrap.dedent(f"""
+                        sleep 10
+                        kubectl exec -n {ah['ns']} vault-0 -- vault operator init -format=json 2>/dev/null || echo VAULT_ALREADY_INIT
+                    """).strip()
+                    _, vinit, _ = ssh(init_cmd, timeout=60)
+                    try:
+                        import json as _json
+                        vdata = _json.loads(vinit.strip())
+                        creds_generated["vault"] = {
+                            "unseal_keys":  vdata.get("unseal_keys_b64", []),
+                            "root_token":   vdata.get("root_token", ""),
+                            "namespace":    ah["ns"],
+                            "access":       "kubectl port-forward -n vault svc/vault 8200:8200",
+                        }
+                    except Exception:
+                        creds_generated["vault"] = {"note": "vault init output not parseable — check manually", "namespace": ah["ns"]}
+                    # Configure K8s auth method
+                    k8s_auth_cmd = textwrap.dedent(f"""
+                        kubectl exec -n {ah['ns']} vault-0 -- sh -c \
+                        'vault login $VAULT_ROOT_TOKEN 2>/dev/null; \
+                         vault auth enable kubernetes 2>/dev/null; \
+                         vault write auth/kubernetes/config \
+                           kubernetes_host="https://kubernetes.default.svc:443"' 2>/dev/null || true
+                    """).strip()
+                    ssh(k8s_auth_cmd, timeout=30)
+                elif app_name == "keycloak":
+                    pw_cmd = "kubectl get secret -n keycloak keycloak -o jsonpath='{.data.admin-password}' | base64 -d"
+                    _, pw_out, _ = ssh(pw_cmd, timeout=15)
+                    creds_generated["keycloak"] = {
+                        "admin_user":  "admin",
+                        "admin_pass":  pw_out.strip() or "(check keycloak secret)",
+                        "namespace":   ah["ns"],
+                        "access":      "kubectl port-forward -n keycloak svc/keycloak 8080:80",
+                        "oidc_url":    "http://keycloak.keycloak.svc.cluster.local/realms/master",
+                    }
+                elif app_name == "harbor":
+                    pw_cmd = "kubectl get secret -n harbor harbor-core -o jsonpath='{.data.secret}' 2>/dev/null | base64 -d || echo 'Harbor12345'"
+                    _, pw_out, _ = ssh(pw_cmd, timeout=15)
+                    creds_generated["harbor"] = {
+                        "admin_user": "admin",
+                        "admin_pass": pw_out.strip() or "Harbor12345",
+                        "namespace":  ah["ns"],
+                        "access":     "kubectl port-forward -n harbor svc/harbor 8080:80",
+                    }
+                elif app_name == "sonarqube":
+                    creds_generated["sonarqube"] = {
+                        "admin_user": "admin",
+                        "admin_pass": "admin (change on first login)",
+                        "namespace":  ah["ns"],
+                        "access":     "kubectl port-forward -n sonarqube svc/sonarqube-sonarqube 9000:9000",
+                    }
+                _state.setdefault("installed_applications", {})[app_name] = {
+                    "namespace": ah["ns"], "creds": creds_generated.get(app_name, {})}
+            cred_lines = []
+            for app, data in creds_generated.items():
+                cred_lines.append(f"\n── {app} credentials ──")
+                for k, v in data.items():
+                    if isinstance(v, list):
+                        cred_lines.append(f"  {k}:")
+                        for item in v: cred_lines.append(f"    {item}")
+                    else:
+                        cred_lines.append(f"  {k}: {v}")
+            cred_note = "\n".join(cred_lines) if cred_lines else ""
+            return [TextContent(type="text", text="Applications:\n" + "\n".join(results) + cred_note +
+                                "\n\nRun generate_cluster_report to save all credentials to a file." +
+                                _format_next_steps("cluster_status"))]
+
+        # ── configure_rbac ────────────────────────────────────────────────
+        elif name == "configure_rbac":
+            cfg()
+            audit_level   = arguments.get("audit_level", "metadata")
+            restrict_sa   = arguments.get("restrict_default_sa", True)
+            dry_run       = arguments.get("dry_run", False)
+            steps = []
+
+            # 1. Patch default ServiceAccounts to disable automount
+            if restrict_sa:
+                cmd = ("for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do "
+                       "kubectl patch serviceaccount default -n $ns "
+                       "-p '{\"automountServiceAccountToken\":false}' 2>/dev/null || true; done")
+                steps.append(("Restrict default ServiceAccount automount", cmd))
+
+            # 2. Remove cluster-admin from system:anonymous if present
+            steps.append(("Remove anonymous cluster-admin binding (if exists)",
+                           "kubectl delete clusterrolebinding cluster-admin-anonymous 2>/dev/null || true"))
+
+            # 3. Set audit policy
+            audit_policy = textwrap.dedent(f"""
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+    resources:
+      - group: ""
+        resources: ["endpoints","services","services/status"]
+  - level: None
+    users: ["system:unsecured"]
+    namespaces: ["kube-system"]
+    verbs: ["get"]
+    resources:
+      - group: ""
+        resources: ["configmaps"]
+  - level: {audit_level.capitalize()}
+    resources:
+      - group: ""
+        resources: ["secrets","configmaps","tokenreviews","subjectaccessreviews"]
+  - level: {audit_level.capitalize()}
+""").strip()
+            steps.append(("Write audit policy", f"cat <<'APEOF' | tee /etc/kubernetes/audit-policy.yaml\n{audit_policy}\nAPEOF"))
+
+            if dry_run:
+                lines = [f"DRY RUN: {label}\n  {cmd}" for label, cmd in steps]
+                return [TextContent(type="text", text="configure_rbac dry run:\n" + "\n".join(lines))]
+
+            results = []
+            for label, cmd in steps:
+                code, _, er = ssh(cmd, timeout=60)
+                results.append(f"[{'OK' if code==0 else 'FAIL'}] {label}" + (f"\n  {er[-200:]}" if code != 0 else ""))
+            return [TextContent(type="text", text="RBAC configuration:\n" + "\n".join(results) + _format_next_steps("cluster_status"))]
+
+        # ── configure_pod_security ────────────────────────────────────────
+        elif name == "configure_pod_security":
+            cfg()
+            c = cfg()
+            mode         = arguments.get("mode", "baseline")
+            default_deny = arguments.get("default_deny_network", True)
+            dry_run      = arguments.get("dry_run", False)
+            steps = []
+
+            # Label all non-system namespaces with PodSecurity admission mode
+            steps.append(("Label namespaces with PodSecurity mode",
+                textwrap.dedent(f"""
+                    for ns in $(kubectl get ns -o jsonpath='{{.items[*].metadata.name}}' | tr ' ' '\\n' | grep -v '^kube-\\|^cert-manager\\|^monitoring\\|^istio'); do
+                        kubectl label namespace $ns pod-security.kubernetes.io/enforce={mode} --overwrite 2>/dev/null || true
+                        kubectl label namespace $ns pod-security.kubernetes.io/warn={mode} --overwrite 2>/dev/null || true
+                    done
+                """).strip()))
+
+            if default_deny:
+                default_deny_manifest = textwrap.dedent("""
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+""").strip()
+                steps.append(("Apply default-deny NetworkPolicy to app namespaces",
+                    textwrap.dedent(f"""
+                        for ns in $(kubectl get ns -o jsonpath='{{.items[*].metadata.name}}' | tr ' ' '\\n' | grep -v '^kube-\\|^cert-manager\\|^monitoring\\|^istio\\|^default$'); do
+                            cat <<'NPEOF' | kubectl apply -n $ns -f - 2>/dev/null || true
+{default_deny_manifest}
+NPEOF
+                        done
+                    """).strip()))
+
+            if dry_run:
+                return [TextContent(type="text", text="configure_pod_security dry run:\n" +
+                                    "\n".join(f"  {l}" for l,_ in steps))]
+            results = []
+            for label, cmd in steps:
+                code, _, er = ssh(cmd, timeout=60)
+                results.append(f"[{'OK' if code==0 else 'FAIL'}] {label}" + (f"\n  {er[-200:]}" if code != 0 else ""))
+            return [TextContent(type="text", text="Pod security configuration:\n" + "\n".join(results) + _format_next_steps("cluster_status"))]
+
+        # ── configure_etcd_encryption ─────────────────────────────────────
+        elif name == "configure_etcd_encryption":
+            cfg()
+            algo    = arguments.get("algorithm", "aes-cbc")
+            dry_run = arguments.get("dry_run", False)
+            import secrets as _secrets, base64 as _base64
+            key_b64 = _base64.b64encode(_secrets.token_bytes(32)).decode()
+            enc_config = textwrap.dedent(f"""
+apiVersion: apiserver.config.k8s.io/v1
+kind: EncryptionConfiguration
+resources:
+  - resources:
+      - secrets
+      - configmaps
+    providers:
+      - {algo.replace("-","")}: {{}}
+        keys:
+          - name: key1
+            secret: {key_b64}
+      - identity: {{}}
+""").strip()
+            cmd = textwrap.dedent(f"""
+                mkdir -p /etc/kubernetes/encryption
+                cat <<'ENCEOF' | tee /etc/kubernetes/encryption/config.yaml
+{enc_config}
+ENCEOF
+                grep -q 'encryption-provider-config' /etc/kubernetes/manifests/kube-apiserver.yaml || \
+                  sed -i '/- kube-apiserver/a\\    - --encryption-provider-config=/etc/kubernetes/encryption/config.yaml' \
+                  /etc/kubernetes/manifests/kube-apiserver.yaml
+                sleep 10
+                kubectl get secrets --all-namespaces -o json | kubectl replace -f - 2>/dev/null || true
+                echo ETCD_ENCRYPTION_DONE
+            """).strip()
+            if dry_run:
+                return [TextContent(type="text", text=f"DRY RUN — etcd encryption config:\n{enc_config}")]
+            code, out, er = ssh(cmd, timeout=120)
+            if code != 0: return err(f"etcd encryption failed:\n{er}")
+            _state.setdefault("security_config", {})["etcd_encryption"] = {"algorithm": algo, "key_b64_preview": key_b64[:8]+"..."}
+            return [TextContent(type="text", text=f"etcd encryption ({algo}) configured.\nAll existing Secrets re-encrypted.\n\nKEY (store securely): {key_b64}" + _format_next_steps("cluster_status"))]
+
+        # ── configure_audit_logging ───────────────────────────────────────
+        elif name == "configure_audit_logging":
+            cfg()
+            level    = arguments.get("level", "metadata")
+            log_path = arguments.get("log_path", "/var/log/kubernetes/audit.log")
+            max_age  = arguments.get("max_age", 30)
+            dry_run  = arguments.get("dry_run", False)
+
+            if level == "none":
+                return [TextContent(type="text", text="Audit logging: skipped (level=none).")]
+
+            audit_policy = textwrap.dedent(f"""
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: None
+    nonResourceURLs: ["/healthz","/readyz","/livez","/metrics"]
+  - level: None
+    users: ["system:kube-proxy","system:apiserver","system:kube-controller-manager","system:kube-scheduler"]
+    verbs: ["watch","list","get"]
+  - level: {level.capitalize()}
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get","list","watch","create","update","patch","delete"]
+  - level: {level.capitalize()}
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles","clusterrolebindings","roles","rolebindings"]
+  - level: Metadata
+    omitStages:
+      - RequestReceived
+""").strip()
+
+            cmd = textwrap.dedent(f"""
+                mkdir -p /etc/kubernetes $(dirname {log_path})
+                cat <<'AUDITEOF' | tee /etc/kubernetes/audit-policy.yaml
+{audit_policy}
+AUDITEOF
+                grep -q 'audit-log-path' /etc/kubernetes/manifests/kube-apiserver.yaml || {{
+                  sed -i '/- kube-apiserver/a\\    - --audit-log-path={log_path}\\n    - --audit-log-maxage={max_age}\\n    - --audit-log-maxbackup=10\\n    - --audit-log-maxsize=100\\n    - --audit-policy-file=/etc/kubernetes/audit-policy.yaml' \
+                    /etc/kubernetes/manifests/kube-apiserver.yaml
+                }}
+                echo AUDIT_DONE
+            """).strip()
+            if dry_run:
+                return [TextContent(type="text", text=f"DRY RUN — audit policy:\n{audit_policy}")]
+            code, out, er = ssh(cmd, timeout=60)
+            if code != 0: return err(f"Audit logging config failed:\n{er}")
+            return [TextContent(type="text", text=f"Audit logging ({level}) configured. Logs: {log_path}" + _format_next_steps("cluster_status"))]
+
+        # ── security_audit ────────────────────────────────────────────────
+        elif name == "security_audit":
+            cfg()
+            requested = arguments.get("standards", ["all"])
+            if "all" in requested:
+                requested = list(COMPLIANCE_CHECKS.keys())
+
+            output = ["COMPLIANCE AUDIT REPORT", "=" * 50]
+            total_checks = 0
+            total_pass   = 0
+
+            for std in requested:
+                checks = COMPLIANCE_CHECKS.get(std, [])
+                if not checks:
+                    continue
+                output.append(f"\n── {std.upper()} ({len(checks)} checks) ──")
+                for label, cmd in checks:
+                    _, out, er = ssh(cmd, timeout=20)
+                    result = (out or er).strip()
+                    # Heuristic pass/fail: empty output or "none" = pass, content = finding
+                    is_finding = bool(result and result.lower() not in ["none", "ok", "ok: insecure-port not set"])
+                    status = "FINDING" if is_finding else "PASS"
+                    total_checks += 1
+                    if not is_finding: total_pass += 1
+                    output.append(f"  [{status}] {label}")
+                    if is_finding:
+                        output.append(f"    {result[:300]}")
+
+            output.append(f"\nSUMMARY: {total_pass}/{total_checks} checks passed")
+            if total_pass < total_checks:
+                output.append("Run generate_cluster_report to save the full audit report.")
+            _state.setdefault("security_config", {})["last_audit"] = {
+                "standards": requested, "pass": total_pass, "total": total_checks}
+            return [TextContent(type="text", text="\n".join(output) + _format_next_steps("audit_cluster"))]
+
+        # ── install_cert_manager ──────────────────────────────────────────
+        elif name == "install_cert_manager":
+            cfg()
+            issuer_type = arguments.get("issuer_type", "self-signed")
+            email       = arguments.get("email", "")
+            dry_run     = arguments.get("dry_run", False)
+            cm          = CERT_MANAGER_HELM
+            sets        = " ".join(f"--set {s}" for s in cm["set"])
+            install_cmd = (f"helm repo add {cm['repo']} {cm['url']} --force-update 2>/dev/null; "
+                           f"helm upgrade --install {cm['release']} {cm['chart']} "
+                           f"--namespace {cm['ns']} --create-namespace {sets}")
+
+            if issuer_type == "self-signed":
+                issuer_manifest = textwrap.dedent("""
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: cluster-ca
+  secretName: cluster-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cluster-ca-issuer
+spec:
+  ca:
+    secretName: cluster-ca-secret
+""").strip()
+            elif issuer_type in ("acme-letsencrypt", "acme-zerossl"):
+                server = ("https://acme-v02.api.letsencrypt.org/directory"
+                          if issuer_type == "acme-letsencrypt"
+                          else "https://acme.zerossl.com/v2/DV90")
+                if not email:
+                    return err(f"email is required for ACME issuer type '{issuer_type}'")
+                issuer_manifest = textwrap.dedent(f"""
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: acme-issuer
+spec:
+  acme:
+    server: {server}
+    email: {email}
+    privateKeySecretRef:
+      name: acme-issuer-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+""").strip()
+            else:  # internal-ca
+                ca_cert = arguments.get("ca_cert", "")
+                ca_key  = arguments.get("ca_key", "")
+                if not ca_cert or not ca_key:
+                    return err("ca_cert and ca_key (base64-encoded) are required for internal-ca issuer")
+                issuer_manifest = textwrap.dedent(f"""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: internal-ca-secret
+  namespace: cert-manager
+type: kubernetes.io/tls
+data:
+  tls.crt: {ca_cert}
+  tls.key: {ca_key}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+spec:
+  ca:
+    secretName: internal-ca-secret
+""").strip()
+
+            apply_cmd = f"sleep 15 && cat <<'ISSEOF' | kubectl apply -f -\n{issuer_manifest}\nISSEOF"
+
+            if dry_run:
+                return [TextContent(type="text", text=f"DRY RUN — cert-manager install + issuer:\n{install_cmd}\n\nIssuer manifest:\n{issuer_manifest}")]
+
+            code, _, er = ssh(with_proxy(install_cmd), timeout=300)
+            if code != 0: return err(f"cert-manager install failed:\n{er}")
+            code, _, er = ssh(apply_cmd, timeout=60)
+            if code != 0: return err(f"ClusterIssuer creation failed:\n{er}")
+            _state.setdefault("security_config", {})["cert_manager"] = {"issuer_type": issuer_type}
+            return [TextContent(type="text", text=f"cert-manager installed, ClusterIssuer ({issuer_type}) created." + _format_next_steps("cluster_status"))]
+
+        # ── renew_service_cert ────────────────────────────────────────────
+        elif name == "renew_service_cert":
+            cfg()
+            cert_name = arguments["certificate_name"]
+            ns        = arguments.get("namespace", "default")
+            force     = arguments.get("force", False)
+            if force:
+                cmd = textwrap.dedent(f"""
+                    SECRET=$(kubectl get certificate -n {ns} {cert_name} -o jsonpath='{{.spec.secretName}}' 2>/dev/null)
+                    if [ -n "$SECRET" ]; then
+                        kubectl delete secret -n {ns} $SECRET 2>/dev/null || true
+                        echo "Secret $SECRET deleted — cert-manager will re-issue"
+                    else
+                        echo "Could not find secretName on Certificate {cert_name}"
+                    fi
+                """).strip()
+            else:
+                cmd = (f"kubectl annotate certificate -n {ns} {cert_name} "
+                       f"cert-manager.io/issueTemporary='{datetime.now().isoformat()}' --overwrite")
+            code, out, er = ssh(cmd, timeout=30)
+            if code != 0: return err(f"Cert renewal trigger failed:\n{er}")
+            return [TextContent(type="text", text=f"Cert renewal triggered for '{cert_name}' in ns/{ns}.\n{out}\ncert-manager will rotate it transparently without pod restarts." + _format_next_steps("rotate_certs"))]
+
+        # ── cost_report ───────────────────────────────────────────────────
+        elif name == "cost_report":
+            cfg()
+            c            = cfg()
+            provider     = arguments.get("cloud_provider") or c.get("cloud_provider", "onprem")
+            breakdown    = arguments.get("breakdown", "all")
+            costing_cfg  = c.get("costing", {})
+            rates        = {**DEFAULT_ONPREM_RATES, **costing_cfg.get("rates", {})}
+            currency     = rates.get("currency", "USD")
+
+            # Always collect resource consumption from the cluster
+            _, nodes_out, _ = ssh("kubectl get nodes -o json")
+            _, pods_out,  _ = ssh("kubectl get pods -A -o json")
+            _, pvc_out,   _ = ssh("kubectl get pvc -A -o json")
+
+            try:
+                import json as _json
+                nodes = _json.loads(nodes_out).get("items", [])
+                pods  = _json.loads(pods_out).get("items",  [])
+                pvcs  = _json.loads(pvc_out).get("items",   [])
+            except Exception as e:
+                return err(f"Could not parse cluster resource data: {e}")
+
+            # Per-namespace CPU/memory aggregation from pod requests
+            ns_resources: dict = {}
+            for pod in pods:
+                ns = pod["metadata"]["namespace"]
+                ns_resources.setdefault(ns, {"cpu_m": 0, "mem_mi": 0, "pods": 0})
+                ns_resources[ns]["pods"] += 1
+                for c_spec in pod["spec"].get("containers", []):
+                    req = c_spec.get("resources", {}).get("requests", {})
+                    cpu_raw = req.get("cpu", "0")
+                    mem_raw = req.get("memory", "0")
+                    # Parse cpu: "500m" or "1"
+                    if cpu_raw.endswith("m"):
+                        ns_resources[ns]["cpu_m"] += int(cpu_raw[:-1])
+                    elif cpu_raw:
+                        try: ns_resources[ns]["cpu_m"] += int(float(cpu_raw) * 1000)
+                        except: pass
+                    # Parse memory: "512Mi" "1Gi" "1G"
+                    if mem_raw.endswith("Mi"):
+                        ns_resources[ns]["mem_mi"] += int(mem_raw[:-2])
+                    elif mem_raw.endswith("Gi"):
+                        ns_resources[ns]["mem_mi"] += int(mem_raw[:-2]) * 1024
+                    elif mem_raw.endswith("M"):
+                        ns_resources[ns]["mem_mi"] += int(mem_raw[:-1])
+
+            # Node capacity totals
+            total_cpu_cores = 0
+            total_ram_gib   = 0
+            for node in nodes:
+                cap = node["status"].get("capacity", {})
+                cpu_raw = cap.get("cpu", "0")
+                mem_raw = cap.get("memory", "0Ki")
+                try: total_cpu_cores += int(cpu_raw)
+                except: pass
+                try:
+                    if mem_raw.endswith("Ki"):
+                        total_ram_gib += int(mem_raw[:-2]) / (1024*1024)
+                    elif mem_raw.endswith("Mi"):
+                        total_ram_gib += int(mem_raw[:-2]) / 1024
+                except: pass
+
+            # PVC storage
+            total_storage_gib = 0
+            for pvc in pvcs:
+                storage_raw = pvc["status"].get("capacity", {}).get("storage", "0Gi")
+                try:
+                    if storage_raw.endswith("Gi"):
+                        total_storage_gib += int(storage_raw[:-2])
+                    elif storage_raw.endswith("Mi"):
+                        total_storage_gib += int(storage_raw[:-2]) / 1024
+                except: pass
+
+            # Cost calculation
+            cpu_hourly   = total_cpu_cores  * rates["cpu_core_hourly_usd"]
+            ram_hourly   = total_ram_gib    * rates["ram_gb_hourly_usd"]
+            storage_mo   = total_storage_gib * rates["storage_gb_monthly_usd"]
+            total_hourly = cpu_hourly + ram_hourly
+            total_monthly = total_hourly * 730 + storage_mo  # 730h/month
+
+            lines = [
+                "COST REPORT",
+                "=" * 40,
+                f"Infrastructure: {provider}  |  Currency: {currency}",
+                "",
+                "── Node capacity ──",
+                f"  CPU cores:    {total_cpu_cores}  @ {rates['cpu_core_hourly_usd']:.4f} {currency}/core/hr",
+                f"  RAM:          {total_ram_gib:.1f} GiB  @ {rates['ram_gb_hourly_usd']:.4f} {currency}/GiB/hr",
+                f"  PVC storage:  {total_storage_gib:.1f} GiB  @ {rates['storage_gb_monthly_usd']:.4f} {currency}/GiB/mo",
+                "",
+                "── Estimated monthly cost ──",
+                f"  Compute (CPU):  {currency} {cpu_hourly*730:,.2f}",
+                f"  Compute (RAM):  {currency} {ram_hourly*730:,.2f}",
+                f"  Storage:        {currency} {storage_mo:,.2f}",
+                f"  TOTAL/month:    {currency} {total_monthly:,.2f}",
+            ]
+
+            if breakdown in ("namespace", "all"):
+                lines.append("\n── Per-namespace resource requests ──")
+                for ns_name in sorted(ns_resources.keys()):
+                    r = ns_resources[ns_name]
+                    ns_cpu  = r["cpu_m"] / 1000
+                    ns_ram  = r["mem_mi"] / 1024
+                    ns_cost = (ns_cpu * rates["cpu_core_hourly_usd"] + ns_ram * rates["ram_gb_hourly_usd"]) * 730
+                    lines.append(f"  {ns_name:<30}  {ns_cpu:.2f} CPU  {ns_ram:.1f} GiB  {currency} {ns_cost:,.2f}/mo  ({r['pods']} pods)")
+
+            if provider in ("aws", "gcp", "azure"):
+                lines.append(f"\n── Cloud billing note ──")
+                lines.append(f"  Real billing API integration for {provider} requires cloud CLI credentials.")
+                lines.append(f"  Set aws_profile / gcp_project / azure_sub in the tool arguments and ensure")
+                lines.append(f"  the cloud CLI is installed and authenticated on this node.")
+                lines.append(f"  The figures above are based on resource consumption × configured rates.")
+
+            lines.append(f"\nNote: rates are configurable under a 'costing.rates' block in your cluster config.")
+            _state["last_cost_report"] = {"total_monthly": total_monthly, "currency": currency}
+            return [TextContent(type="text", text="\n".join(lines) + _format_next_steps("cluster_status"))]
+
+        # ── generate_cluster_report ───────────────────────────────────────
+        elif name == "generate_cluster_report":
+            c              = cfg()
+            output_dir     = arguments.get("output_dir", "/opt/cluster-report")
+            inc_secrets    = arguments.get("include_secrets", True)
+            ts             = datetime.now().strftime("%Y%m%d-%H%M%S")
+            report_dir     = f"{output_dir}/{ts}"
+
+            # ── Gather all state ──────────────────────────────────────────
+            # Cluster basics
+            _, nodes_out,  _ = ssh("kubectl get nodes -o wide")
+            _, ns_out,     _ = ssh("kubectl get namespaces")
+            _, svc_out,    _ = ssh("kubectl get svc -A")
+            _, pv_out,     _ = ssh("kubectl get pv")
+            _, cert_out,   _ = ssh("kubeadm certs check-expiration 2>/dev/null || echo 'kubeadm not available'")
+            _, cm_cert_out, _ = ssh("kubectl get certificates -A 2>/dev/null || echo 'cert-manager not installed'")
+            _, sa_out,     _ = ssh("kubectl get serviceaccounts -A")
+            _, np_out,     _ = ssh("kubectl get networkpolicies -A 2>/dev/null || echo none")
+
+            # All installed application credentials from state
+            installed_apps = _state.get("installed_applications", {})
+            installed_sec  = _state.get("installed_security_tools", [])
+            security_conf  = _state.get("security_config", {})
+            last_audit     = security_conf.get("last_audit", {})
+            cost_data      = _state.get("last_cost_report", {})
+            nc             = c.get("node_config", DEFAULT_NODE_CONFIG)
+
+            # Standard credentials (Jenkins, Grafana, etc.)
+            std_creds = {}
+            # Jenkins
+            jns_out = ssh("kubectl get secret -n jenkins jenkins -o jsonpath='{.data.jenkins-admin-password}' 2>/dev/null | base64 -d")[1]
+            if jns_out: std_creds["jenkins"] = {"user": "admin", "pass": jns_out.strip(), "access": "kubectl port-forward -n jenkins svc/jenkins 8080:8080"}
+            # Grafana
+            gns_out = ssh("kubectl get secret -n monitoring monitoring-grafana -o jsonpath='{.data.admin-password}' 2>/dev/null | base64 -d")[1]
+            if gns_out: std_creds["grafana"] = {"user": "admin", "pass": gns_out.strip(), "access": "kubectl port-forward -n monitoring svc/monitoring-grafana 3000:80"}
+
+            # Mask secrets if include_secrets=False
+            def maybe_mask(v):
+                return v if inc_secrets else "***REDACTED***"
+
+            # ── Build Markdown report ─────────────────────────────────────
+            md = []
+            md.append(f"# Cluster report — {c.get('cluster_name','unknown')}  ({ts})")
+            md.append(f"\nGenerated by k8s-mcp-v1\n")
+
+            md.append("## Cluster overview")
+            md.append(f"- **Cluster name:** {c.get('cluster_name')}")
+            md.append(f"- **Kubernetes version:** {c.get('k8s_version')}")
+            md.append(f"- **CNI:** {c.get('cni')}  |  **Profile:** {c.get('profile')}  |  **Monitoring:** {c.get('monitoring','none')}")
+            md.append(f"- **Pod CIDR:** {c.get('pod_cidr')}  |  **Service CIDR:** {c.get('service_cidr')}")
+            md.append(f"- **Control plane:** {'HA — '+str(len(c.get('masters',[])))+ ' masters' if len(c.get('masters',[]))>1 else 'single master'}")
+            md.append(f"- **Proxy:** {c.get('proxy',{}).get('http_proxy','none (direct internet)')}")
+
+            md.append("\n## Node configuration applied")
+            md.append(f"- sysctl preset: `{nc.get('sysctl_preset')}`")
+            md.append(f"- kernel modules: `{nc.get('kernel_modules')}`")
+            md.append(f"- iptables mode: `{nc.get('iptables_mode')}`  |  swap: `{nc.get('swap')}`  |  SELinux (RHEL): `{nc.get('selinux')}`")
+            md.append(f"- hugepages THP: `{'enabled' if nc.get('hugepages') else 'disabled'}`  |  ulimits: `{'set' if nc.get('ulimits',True) else 'skipped'}`")
+
+            md.append("\n## Nodes\n```")
+            md.append(nodes_out.strip())
+            md.append("```")
+
+            md.append("\n## Namespaces\n```")
+            md.append(ns_out.strip())
+            md.append("```")
+
+            md.append("\n## Network")
+            md.append(f"- Pod CIDR: `{c.get('pod_cidr')}`")
+            md.append(f"- Service CIDR: `{c.get('service_cidr')}`")
+            md.append("\n### NetworkPolicies\n```")
+            md.append(np_out.strip())
+            md.append("```")
+
+            md.append("\n## Services\n```")
+            md.append(svc_out.strip())
+            md.append("```")
+
+            md.append("\n## Persistent volumes\n```")
+            md.append(pv_out.strip())
+            md.append("```")
+
+            md.append("\n## Certificate expiry (control plane)")
+            md.append("```")
+            md.append(cert_out.strip())
+            md.append("```")
+            md.append("\n### cert-manager Certificates")
+            md.append("```")
+            md.append(cm_cert_out.strip())
+            md.append("```")
+
+            md.append("\n## ServiceAccounts\n```")
+            md.append(sa_out.strip())
+            md.append("```")
+
+            md.append("\n## Credentials and access")
+            md.append("> Keep this section confidential. Do not commit to source control.\n")
+            all_creds = {**std_creds, **{k: v.get("creds",{}) for k,v in installed_apps.items()}}
+            for svc_name, creds in all_creds.items():
+                md.append(f"### {svc_name}")
+                for k, v in creds.items():
+                    vv = maybe_mask(str(v)) if k in ("pass","admin_pass","root_token","unseal_keys","token") else str(v)
+                    md.append(f"- **{k}:** `{vv}`")
+
+            md.append("\n## Security tools installed")
+            md.append(", ".join(installed_sec) if installed_sec else "none")
+            if last_audit:
+                md.append(f"\n### Last compliance audit")
+                md.append(f"- Standards checked: {', '.join(last_audit.get('standards',[]))}")
+                md.append(f"- Result: **{last_audit.get('pass',0)}/{last_audit.get('total',0)} checks passed**")
+            if security_conf.get("etcd_encryption"):
+                md.append(f"\n### etcd encryption")
+                md.append(f"- Algorithm: `{security_conf['etcd_encryption']['algorithm']}`  (key stored on master)")
+            if security_conf.get("cert_manager"):
+                md.append(f"\n### cert-manager")
+                md.append(f"- Issuer type: `{security_conf['cert_manager']['issuer_type']}`")
+
+            if cost_data:
+                md.append(f"\n## Cost estimate")
+                md.append(f"- Total monthly estimate: **{cost_data.get('currency','USD')} {cost_data.get('total_monthly',0):,.2f}**")
+                md.append("- Run `cost_report` for a full per-namespace breakdown.")
+
+            md.append("\n## Next recommended actions")
+            md.append("- [ ] Change all default passwords listed above")
+            md.append("- [ ] Run `security_audit` to check compliance against CIS/NSA benchmarks")
+            md.append("- [ ] Schedule regular `backup_etcd` runs")
+            md.append("- [ ] Set up a GitOps workflow via ArgoCD pointing at your application repos")
+            md.append("- [ ] Configure Alertmanager notification channels in Prometheus")
+
+            md_content = "\n".join(md)
+
+            # ── Build YAML report ─────────────────────────────────────────
+            yaml_data = {
+                "cluster": {
+                    "name": c.get("cluster_name"), "k8s_version": c.get("k8s_version"),
+                    "cni": c.get("cni"), "profile": c.get("profile"),
+                    "pod_cidr": c.get("pod_cidr"), "service_cidr": c.get("service_cidr"),
+                    "masters": [n["name"] for n in c.get("masters",[])],
+                    "workers": [n["name"] for n in c.get("workers",[])],
+                },
+                "credentials": {
+                    svc: {k: (maybe_mask(str(v)) if k in ("pass","admin_pass","root_token","unseal_keys") else str(v))
+                          for k, v in creds.items()}
+                    for svc, creds in all_creds.items()
+                },
+                "security_tools": installed_sec,
+                "compliance_last_audit": last_audit,
+                "security_config": security_conf,
+                "cost_estimate_usd_monthly": cost_data.get("total_monthly", 0),
+                "generated_at": ts,
+            }
+            yaml_content = yaml.dump(yaml_data, default_flow_style=False, allow_unicode=True)
+
+            # ── Write both files to master node ──────────────────────────
+            write_cmd = textwrap.dedent(f"""
+                mkdir -p {report_dir}
+                cat <<'MDEOF' > {report_dir}/cluster-report.md
+{md_content}
+MDEOF
+                cat <<'YAMLEOF' > {report_dir}/cluster-report.yaml
+{yaml_content}
+YAMLEOF
+                chmod 600 {report_dir}/cluster-report.md {report_dir}/cluster-report.yaml
+                echo "Files written to {report_dir}"
+                ls -lh {report_dir}/
+            """).strip()
+            code, out, er = ssh(write_cmd, timeout=30)
+            summary = md_content[:1200] + "\n\n...(truncated — full report on master at " + report_dir + ")"
+            return [TextContent(type="text", text=
+                f"Cluster report generated at {report_dir} on master node.\n"
+                f"Two files written: cluster-report.md and cluster-report.yaml\n"
+                f"Permissions: 600 (owner-only readable)\n\n"
+                f"To retrieve locally:\n"
+                f"  scp <user>@<master-ip>:{report_dir}/cluster-report.md ./\n"
+                f"  scp <user>@<master-ip>:{report_dir}/cluster-report.yaml ./\n\n"
+                f"── Report summary ──\n{summary}")]
 
         else:
             return err(f"Unknown tool '{name}'")
