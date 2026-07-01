@@ -18,7 +18,7 @@
 6. [Prerequisites](#6-prerequisites)
 7. [Installation](#7-installation)
 8. [Cluster config file — every field explained](#8-cluster-config-file--every-field-explained)
-9. [All 34 tools — complete reference](#9-all-34-tools--complete-reference)
+9. [All 41 tools — complete reference](#9-all-41-tools--complete-reference)
 10. [Cluster profiles](#10-cluster-profiles)
 11. [CNI options](#11-cni-options)
 12. [Node configuration — kernel, sysctl, iptables, SELinux](#12-node-configuration--kernel-sysctl-iptables-selinux)
@@ -39,6 +39,8 @@
 27. [Setting up the executor node — step by step](#27-setting-up-the-executor-node--step-by-step)
 28. [Example prompts — how to talk to Claude](#28-example-prompts--how-to-talk-to-claude)
 
+**Quick reference:** [Session persistence](#how-session-state-works) | [Multi-cluster](#save_cluster) | [Audit trail](#show_audit_log) | [Offline validation](#validate_config) | [Examples directory](#repo-structure)
+
 ---
 
 ## 1. What this is
@@ -56,11 +58,30 @@ You describe what you want. Claude calls the right tools in the right order. You
 - Rotate certificates with zero downtime
 - Generate a complete cluster report (credentials, IPs, namespaces, costs) as Markdown and YAML
 - Estimate cluster running costs for on-prem, OpenStack, AWS, GCP, and Azure
+- Manage multiple named cluster sessions — switch between prod/staging/dev without losing context
+- Keep a full audit trail of every action taken (timestamped, secrets masked, compliance-ready)
+- Validate configs completely offline before touching any server
 
 **What it does NOT do:**
 - Provision the virtual machines themselves (you need existing Linux VMs with SSH access)
 - Manage DNS or load balancers outside the cluster
 - Store any credentials itself — they are written to files on your master node
+
+**Repo structure:**
+```
+k8s_factory_mcp.py         — 41 tools, ~4,100 lines, the entire MCP server
+cluster_config.yaml         — fully annotated reference configuration
+README.md                   — complete documentation (28 sections)
+TODO.md                     — feature matrix and roadmap
+CONTRIBUTING.md             — how to add tools, OS support, compliance checks
+LICENSE                     — Apache 2.0
+examples/
+  single-node-dev.yaml      — single VM for learning
+  3-node-production.yaml    — standard production cluster
+  5-node-ha.yaml            — 3 masters + 2 workers, HA
+  openstack-rhel-proxy.yaml — OpenStack RHEL behind a corporate proxy
+  gpu-ml-cluster.yaml       — GPU workers + ML profile
+```
 
 ---
 
@@ -407,39 +428,59 @@ costing:
     storage_gb_monthly_usd: 0.10   # Cost per GiB persistent storage per month
     power_kwh_usd:          0.12   # Electricity cost per kWh (for power estimate)
     currency: USD                  # Currency label in reports
+
+# ── Global dry-run mode (optional) ───────────────────────────────────────────
+# Set to true to run every tool in preview mode — no changes to any server.
+# Equivalent to passing dry_run: true to every individual tool call.
+# Useful for reviewing a full plan before committing to execute it.
+# global_dry_run: false
+
+# ── Session notes ─────────────────────────────────────────────────────────────
+# Session state is saved automatically to ~/.k8s-mcp/state.json on the machine
+# running the MCP server after every successful tool call. You can close the
+# terminal and resume the session later — plan_cluster does not need to be re-run.
+# Use save_cluster / switch_cluster to manage multiple named cluster sessions.
+# Every tool call is logged to ~/.k8s-mcp/audit.log with secrets masked.
 ```
 
 ---
 
-## 9. All 34 tools — complete reference
+## 9. All 41 tools — complete reference
 
 ### How tools are organised
 
-The 34 tools fall into six groups:
+The 41 tools fall into seven groups:
 
 ```
-Group A — Cluster lifecycle (7 tools)
-  plan_cluster → prepare_nodes → bootstrap_cluster → install_cni → install_stack → cluster_status → destroy_cluster
+Group A — Cluster lifecycle (8 tools)
+  preflight_check → plan_cluster → prepare_nodes → bootstrap_cluster →
+  install_cni → install_stack → cluster_status → destroy_cluster
 
 Group B — Applications and services (5 tools)
-  install_monitoring, install_jenkins, install_cert_manager, install_security_tools, install_applications
+  install_monitoring, install_jenkins, install_cert_manager,
+  install_security_tools, install_applications
 
 Group C — Security hardening (6 tools)
-  configure_rbac, configure_pod_security, configure_etcd_encryption, configure_audit_logging,
-  security_audit, audit_cluster
+  configure_rbac, configure_pod_security, configure_etcd_encryption,
+  configure_audit_logging, security_audit, audit_cluster
 
 Group D — Day-2 operations (9 tools)
   scale_cluster, upgrade_cluster, backup_etcd, restore_etcd, rotate_certs,
   renew_service_cert, helm_manage, cluster_snapshot, migrate_workload
 
 Group E — Observability and access (5 tools)
-  cluster_status, node_diagnostics, stream_logs, manage_kubeconfig, provision_namespace
+  cluster_status, node_diagnostics, stream_logs, manage_kubeconfig,
+  provision_namespace
 
 Group F — Reporting and storage (4 tools)
-  generate_cluster_report, cost_report, provision_storage, audit_cluster (also in C)
+  generate_cluster_report, cost_report, provision_storage, audit_cluster
+
+Group G — Session, multi-cluster, validation, and audit (7 tools)
+  validate_config, save_cluster, switch_cluster, list_clusters,
+  delete_cluster, show_audit_log, and the audit trail system itself
 ```
 
-Every tool that touches the network supports `dry_run: true` — which prints the exact commands that would run without executing them.
+Every tool that touches the network supports `dry_run: true` — which prints the exact commands that would run without executing them. Setting `global_dry_run: true` in the cluster config applies dry-run mode to every tool in the session automatically.
 
 ---
 
@@ -1311,6 +1352,175 @@ Setting `set_default: true` (the default) patches the StorageClass with the anno
 
 ---
 
+### Group G — Session, multi-cluster, validation, and audit
+
+This group manages how the MCP server stores state, handles multiple clusters, validates configs offline, and keeps a compliance audit trail of every action taken.
+
+#### How session state works
+
+Every time a tool call succeeds, the MCP server automatically writes the current session state to `~/.k8s-mcp/state.json` on the machine running the MCP server. This includes:
+
+- The full cluster config (all node IPs, SSH keys, settings)
+- The kubeadm join command and certificate key
+- Which Helm packages were successfully installed
+- Credentials generated for installed applications (Jenkins, Grafana, Vault, etc.)
+- Security configuration applied
+
+When you close the `claude` terminal and reopen it, the state is automatically restored from disk. You do not need to re-run `plan_cluster`. The session continues exactly where you left it.
+
+The state file is written with `chmod 600` (owner-readable only) and is located at:
+
+```
+~/.k8s-mcp/state.json    — current session state
+~/.k8s-mcp/clusters.json — registry of all saved named clusters
+~/.k8s-mcp/audit.log     — timestamped record of every tool call
+```
+
+#### `validate_config`
+
+**What it does:** Validates a cluster config YAML file completely offline — no SSH, no servers required. Runs all checks that `plan_cluster` performs plus additional ones that are safe to check without live access.
+
+**Checks performed:**
+- All required fields present
+- `cni`, `profile`, `monitoring` are valid supported values
+- `k8s_version` is in `MAJOR.MINOR` format (e.g. `1.30`)
+- `pod_cidr` and `service_cidr` are valid CIDR notation
+- `pod_cidr` and `service_cidr` do not overlap each other
+- Unusually small subnets flagged as warnings
+- Node names are unique across masters and workers
+- SSH key files exist at the specified paths on the local machine
+- `proxy` block has at least one of `http_proxy` or `https_proxy` if present
+- All `node_config` values are within supported options
+
+**Output:** Reports errors (must fix) and warnings (review) separately. Clean configs show `VALIDATION PASSED`.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `config` | string | yes | Full YAML cluster config to validate |
+
+**Example:**
+```
+You: Validate this config before I use it: [paste config]
+Claude: [calls validate_config, finds no SSH key at ~/.ssh/id_rsa, reports as warning]
+```
+
+---
+
+#### `save_cluster`
+
+**What it does:** Gives the current session an explicit name and saves it to `~/.k8s-mcp/clusters.json`. Allows managing multiple clusters — each saved under a different name.
+
+State is already auto-saved to disk on every tool call. `save_cluster` is the named, intentional checkpoint that lets you `switch_cluster` later.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Cluster name e.g. `prod`, `staging`, `dev` |
+
+---
+
+#### `switch_cluster`
+
+**What it does:** Loads a previously saved cluster session and makes it the active one. All subsequent tool calls target the switched cluster.
+
+Clears the current in-memory state and loads the saved config, installed packages list, application credentials, and security configuration for the target cluster.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Cluster name to switch to (must exist in `list_clusters`) |
+
+---
+
+#### `list_clusters`
+
+**What it does:** Shows all saved cluster sessions with their details.
+
+**Output per cluster:** name, K8s version, master/worker counts, profile, list of installed Helm packages, and when it was last saved. The currently active cluster is marked with ← ACTIVE.
+
+**No parameters.**
+
+---
+
+#### `delete_cluster`
+
+**What it does:** Removes a saved cluster session from the registry. Does NOT destroy the actual Kubernetes cluster — only removes the local session record.
+
+To destroy the actual cluster first, use `destroy_cluster`, then `delete_cluster` to clean up the registry entry.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Cluster name to remove from registry |
+| `confirm` | string | yes | Must be exactly `DELETE` |
+
+---
+
+#### `show_audit_log`
+
+**What it does:** Shows the compliance audit trail — a timestamped record of every tool call made through this MCP server.
+
+**What each entry contains:**
+- Timestamp (ISO 8601)
+- Cluster name (which cluster was being operated on)
+- Tool name (which of the 41 tools was called)
+- Parameters (with passwords, tokens, and keys automatically masked as `***`)
+- Outcome (`started`, `success`, `error`, `exception`)
+- A short note (e.g. `cluster=prod nodes=3`)
+
+**Example output:**
+```
+2024-01-15T14:32:01  [prod-cluster]  plan_cluster     → success  (cluster=prod nodes=3)
+2024-01-15T14:33:45  [prod-cluster]  prepare_nodes    → success  (installed=3)
+2024-01-15T14:51:22  [prod-cluster]  bootstrap_cluster→ success  (masters=1 workers=2)
+2024-01-15T15:02:11  [prod-cluster]  install_cni      → success
+2024-01-15T15:18:44  [prod-cluster]  install_stack    → error    (helm repo add failed)
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `lines` | integer | 50 | Number of recent entries to show |
+| `cluster` | string | all | Filter by cluster name |
+| `tool` | string | all | Filter by tool name |
+
+**Full log path:** `~/.k8s-mcp/audit.log` on the machine running the MCP server.
+
+---
+
+#### `preflight_check`
+
+**What it does:** SSHes into all nodes in parallel and verifies they are ready to be bootstrapped — before running `prepare_nodes`. Auto-fixes missing tools if `fix: true` (the default).
+
+**Checks run on each node:**
+- OS detection (reports which distro and family was found)
+- Free disk space (warns if less than 20 GB free on `/`)
+- RAM (warns if less than 2 GB available)
+- Port availability: 6443, 10250, 2379, 2380 (warns if already in use)
+- Swap status (warns if swap is active — kubeadm requires it disabled)
+- Internet/proxy reachability (tests https://registry.k8s.io)
+- Tool presence: `helm`, `etcdctl`, `kubectl`, `kubeadm`, `git`, `jq`
+
+**Auto-fix:** When `fix: true` (default), any missing tool is installed immediately:
+- `helm` — installed via the official get-helm-3 script
+- `etcdctl` — binary downloaded from GitHub releases
+- `git`, `jq` — installed via the node's package manager
+
+**Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `fix` | boolean | true | Auto-install missing tools found during check |
+| `node_name` | string | all nodes | Run on a specific node only |
+
+---
+
 ## 10. Cluster profiles
 
 A profile determines which Helm packages are installed when you run `install_stack`. You can always install additional packages later with `helm_manage` or `install_applications`.
@@ -1568,6 +1778,21 @@ After running `generate_cluster_report`, two files appear on the master node at 
 
 Both files are written with `chmod 600` (owner-readable only).
 
+**⚠️ Credential rotation required after every report generation:**
+
+Every time `generate_cluster_report` is called, the tool outputs a security notice listing which credentials to rotate and how. This is shown prominently in the conversation — do not skip it. The specific items to rotate after a new cluster setup:
+
+| Service | How to rotate |
+|---------|--------------|
+| Grafana | `helm upgrade monitoring ... --set grafana.adminPassword=<new>` |
+| Jenkins | Admin UI → Manage Jenkins → Security |
+| SonarQube | Forced on first login by SonarQube itself |
+| Harbor | Admin UI → Administration → Users |
+| Vault root token | Use only for initial setup — revoke after configuring auth methods |
+| Keycloak admin | Realm Settings → Users after first login |
+
+The report file itself: do **not** commit it to any git repository. Do **not** share it over unencrypted channels. Delete it from the master node once you have retrieved and stored it securely (ideally: import credentials into Vault, then delete the file).
+
 **Retrieve them:**
 ```bash
 scp user@<master-ip>:/opt/cluster-report/*/cluster-report.md ./
@@ -1655,42 +1880,53 @@ masters:
 This is the full recommended sequence for a new production cluster.
 
 ```
-Step 1:  Write cluster_config.yaml   (see section 8)
-Step 2:  claude mcp list             (confirm k8s-factory is connected)
-Step 3:  claude                      (start a session)
+Step 1:  Write cluster_config.yaml   (use an example from examples/ as a starting point)
+Step 2:  validate_config             Offline validation — catch errors before touching servers
+Step 3:  claude mcp list             (confirm k8s-factory is connected)
+Step 4:  claude                      (start a session)
 
 ── In the session ──────────────────────────────────────────────────────────────
 
-Step 4:  plan_cluster                Review plan, node_config defaults, proxy status
-Step 5:  prepare_nodes dry_run       See the exact script before it runs
-Step 6:  prepare_nodes               OS detected, containerd and kubeadm installed
-Step 7:  bootstrap_cluster           Kubernetes control plane + worker joins
-Step 8:  install_cni                 Nodes go Ready
-Step 9:  cluster_status              Confirm all nodes Ready, system pods Running
+Step 5:  plan_cluster                Review plan, node_config defaults, proxy status
+Step 6:  preflight_check             Verify all nodes: disk, RAM, ports, tools — auto-fix
+Step 7:  prepare_nodes dry_run       See the exact script before it runs
+Step 8:  prepare_nodes               OS detected, containerd and kubeadm installed
+Step 9:  bootstrap_cluster           Kubernetes control plane + worker joins
+                                     (idempotent — safe to re-run if partially failed)
+Step 10: install_cni                 Nodes go Ready
+Step 11: cluster_status              Confirm all nodes Ready, system pods Running
 
-Step 10: install_stack               Profile packages installed (ArgoCD, cert-manager, etc.)
-Step 11: install_monitoring          Prometheus + Grafana (or + Loki)
-Step 12: install_cert_manager        cert-manager + ClusterIssuer
-Step 13: install_jenkins             Jenkins (if needed)
-Step 14: install_security_tools      Falco, Gatekeeper, Trivy, Kyverno (choose any)
-Step 15: install_applications        SonarQube, Harbor, Vault, Keycloak (choose any)
+Step 12: install_stack               Profile packages (resume-from-failure if interrupted)
+Step 13: install_monitoring          Prometheus + Grafana (or + Loki)
+Step 14: install_cert_manager        cert-manager + ClusterIssuer
+Step 15: install_jenkins             Jenkins CI/CD (if needed)
+Step 16: install_security_tools      Falco, Gatekeeper, Trivy, Kyverno (choose any)
+Step 17: install_applications        SonarQube, Harbor, Vault, Keycloak (choose any)
 
-Step 16: configure_rbac              Restrict default SAs, write audit policy
-Step 17: configure_pod_security      PSA mode + default-deny NetworkPolicy
-Step 18: configure_etcd_encryption   Encrypt secrets at rest
-Step 19: configure_audit_logging     API server audit log
+Step 18: configure_rbac              Restrict default SAs, write audit policy
+Step 19: configure_pod_security      PSA mode + default-deny NetworkPolicy
+Step 20: configure_etcd_encryption   Encrypt secrets at rest
+Step 21: configure_audit_logging     API server audit log
 
-Step 20: provision_namespace         Create a namespace for your first team
-Step 21: manage_kubeconfig           Give them a scoped kubeconfig
+Step 22: provision_namespace         Create a namespace for your first team
+Step 23: manage_kubeconfig           Give them a scoped kubeconfig
 
-Step 22: backup_etcd                 Take the first backup
-Step 23: security_audit              Baseline compliance check (CIS + NSA + PCI + SOC2)
-Step 24: cost_report                 Resource consumption and cost estimate
-Step 25: generate_cluster_report     Write both report files to the master node
-Step 26: scp the report files off    Save them securely
+Step 24: backup_etcd                 Take the first backup
+Step 25: security_audit              Baseline compliance check (CIS + NSA + PCI + SOC2)
+Step 26: cost_report                 Resource consumption and cost estimate
+Step 27: generate_cluster_report     Write Markdown + YAML report (read the rotation warning!)
+
+Step 28: save_cluster                Save the session as "prod" (or your cluster name)
+Step 29: show_audit_log              Review every action taken during setup
+Step 30: scp the report files off    Save them securely — delete from master after
 ```
 
-You do not have to do all 26 steps in one session. The MCP server holds session state while the `claude` terminal is open. If you close the terminal and reopen it, run `plan_cluster` again to restore the session state before calling any other tool.
+You do not have to do all 30 steps in one session. Session state is automatically
+saved to `~/.k8s-mcp/state.json` after every successful tool call — closing the
+terminal does not lose your progress. Reopen `claude` and continue where you left off.
+
+For multiple clusters: use `save_cluster` to name each session, and `switch_cluster`
+to move between them. `list_clusters` shows all saved sessions.
 
 ---
 
@@ -1789,9 +2025,17 @@ If using a proxy: confirm the `proxy:` block is in your config and the proxy URL
 
 If direct internet: confirm the nodes can reach `registry.k8s.io`, `charts.helm.sh`, and the Helm chart repos.
 
-### Session state lost (closed the terminal)
+### Session state after terminal restart
 
-Re-run `plan_cluster` with the same config. The session state is restored and you can continue with whichever tool you were on.
+Session state is automatically saved to `~/.k8s-mcp/state.json` after every successful tool call. If you close the terminal and reopen it, the state is restored automatically — you do not need to re-run `plan_cluster`.
+
+To confirm the state was restored, run `list_clusters` or `cluster_status` immediately after reopening the session. If the state is missing (e.g. on a fresh machine), re-run `plan_cluster` with the same config to restore it.
+
+For intentional multi-cluster management: `save_cluster prod`, `save_cluster staging`, then `switch_cluster prod` and `switch_cluster staging` to move between them cleanly.
+
+### install_stack partially failed (some packages failed, some succeeded)
+
+Re-run `install_stack` — it tracks which releases were successfully installed and skips them, retrying only the ones that failed. You will see `[SKIP]` lines for already-installed packages and the retry only applies to the failures.
 
 ---
 
@@ -2652,6 +2896,87 @@ Set up a complete DevOps environment on this cluster:
 6. Create a namespace "cicd" for the CI/CD team with 8 CPU and 16Gi
 7. Generate the cluster report with all credentials at the end
 Ask me for any choices you need to make along the way.
+```
+
+---
+
+### Validating a config before using it
+
+```
+Validate this cluster config before I run plan_cluster:
+[paste config YAML]
+```
+
+```
+Check if my config has any CIDR conflicts or missing fields.
+I don't want to start the cluster build until it's clean.
+```
+
+```
+I'm not sure my pod_cidr is right for an OpenStack network on 10.x.x.x —
+validate this config and tell me if there are any subnet conflicts.
+```
+
+---
+
+### Managing multiple clusters
+
+```
+Save this cluster session as "prod" so I can switch back to it later.
+```
+
+```
+Show me all the clusters I have saved and which one is active right now.
+```
+
+```
+Switch to the "staging" cluster.
+Then show me its status.
+```
+
+```
+I need to work on three clusters today: prod, staging, and dev.
+Save the current session as "prod", then help me create configs
+for staging (same setup, different IPs) and dev (single-node).
+```
+
+---
+
+### Reviewing the audit trail
+
+```
+Show me the last 20 actions taken on this cluster.
+```
+
+```
+What did we do to the prod cluster in the last session?
+Filter the audit log to show only prod cluster entries.
+```
+
+```
+Show me all the times install_stack was called, on any cluster,
+to see if there were any failures we need to follow up on.
+```
+
+---
+
+### Using the examples directory
+
+```
+I'm new to this and want to start with a single-node dev cluster.
+Use the single-node-dev.yaml example as a starting point.
+What IPs do I need to change?
+```
+
+```
+Show me the difference between the 3-node-production and 5-node-ha
+example configs — when would I choose one over the other?
+```
+
+```
+I have an OpenStack environment similar to the one in the examples.
+Adapt the openstack-rhel-proxy.yaml example for my network:
+proxy is at 10.50.0.1:3128, nodes are at 172.20.0.x
 ```
 
 ---

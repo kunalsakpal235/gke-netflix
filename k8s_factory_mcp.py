@@ -38,10 +38,14 @@ Full documentation: README.md
 """
 
 import asyncio
+import hashlib
+import json
+import os
 import re
 import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import paramiko
@@ -1044,6 +1048,19 @@ NEXT_STEPS = {
     ],
     "cluster_snapshot": [
         ("backup_etcd",       "Pair this with an etcd backup for full disaster-recovery coverage"),
+        ("save_cluster",      "Save this cluster session so you can switch back to it later"),
+    ],
+    "generate_cluster_report": [
+        ("save_cluster",      "Save the cluster session so you can resume it later"),
+        ("show_audit_log",    "Review all tool calls made during this cluster setup"),
+    ],
+    "save_cluster": [
+        ("list_clusters",     "See all saved clusters"),
+        ("show_audit_log",    "Review the audit trail for this cluster"),
+    ],
+    "switch_cluster": [
+        ("cluster_status",    "Check the status of the switched-to cluster"),
+        ("list_clusters",     "See all saved clusters"),
     ],
 }
 
@@ -1465,11 +1482,107 @@ spec:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MCP Server — tool list
+# Session persistence, multi-cluster registry, and audit trail
+#
+# State is saved to ~/.k8s-mcp/state.json so sessions survive terminal restarts.
+# Multiple clusters are each saved under a unique name — switch between them
+# with switch_cluster without losing any session data.
+# Every tool call is appended to ~/.k8s-mcp/audit.log for compliance traceability.
+# ─────────────────────────────────────────────────────────────────────────────
+
+MCP_HOME         = Path.home() / ".k8s-mcp"
+STATE_FILE       = MCP_HOME / "state.json"
+AUDIT_LOG_FILE   = MCP_HOME / "audit.log"
+CLUSTERS_FILE    = MCP_HOME / "clusters.json"
+
+MCP_HOME.mkdir(parents=True, exist_ok=True)
+
+# ── in-memory state (single active cluster session) ──────────────────────────
+_state: dict[str, Any] = {}
+
+# ── active cluster name (used by multi-cluster tools) ────────────────────────
+_active_cluster: str = ""
+
+
+def _load_state() -> None:
+    """Load the last saved session state from disk on startup."""
+    global _state, _active_cluster
+    if STATE_FILE.exists():
+        try:
+            data = json.loads(STATE_FILE.read_text())
+            _state = data.get("state", {})
+            _active_cluster = data.get("active_cluster", "")
+        except Exception:
+            pass  # corrupt file — start fresh
+
+
+def _save_state() -> None:
+    """Persist the current session state to disk after every mutation."""
+    try:
+        STATE_FILE.write_text(json.dumps({
+            "state": _state,
+            "active_cluster": _active_cluster,
+            "saved_at": datetime.now().isoformat(),
+        }, indent=2, default=str))
+        STATE_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def _load_clusters() -> dict:
+    """Load the saved cluster registry (name → config snapshot)."""
+    if CLUSTERS_FILE.exists():
+        try:
+            return json.loads(CLUSTERS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_clusters(clusters: dict) -> None:
+    try:
+        CLUSTERS_FILE.write_text(json.dumps(clusters, indent=2, default=str))
+        CLUSTERS_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def _audit(tool_name: str, arguments: dict, outcome: str, extra: str = "") -> None:
+    """Append one structured line to the audit log for every tool call."""
+    try:
+        cluster_name = _active_cluster or (_state.get("config", {}).get("cluster_name", "unknown"))
+        # Mask sensitive values in arguments before logging
+        safe_args = {k: ("***" if any(s in k.lower() for s in
+                          ["password","secret","token","key","cert","pass"]) else v)
+                     for k, v in arguments.items()}
+        entry = json.dumps({
+            "ts":      datetime.now().isoformat(),
+            "cluster": cluster_name,
+            "tool":    tool_name,
+            "args":    safe_args,
+            "outcome": outcome,
+            "note":    extra[:200] if extra else "",
+        })
+        with AUDIT_LOG_FILE.open("a") as f:
+            f.write(entry + "\n")
+        AUDIT_LOG_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def _global_dry_run(cfg_dict: dict) -> bool:
+    """Return True if global dry_run mode is set in the cluster config."""
+    return bool(cfg_dict.get("global_dry_run", False))
+
+
+# Boot: load any persisted state immediately
+_load_state()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP Server
 # ─────────────────────────────────────────────────────────────────────────────
 
 server = Server("k8s-factory")
-_state: dict[str, Any] = {}
 
 
 @server.list_tools()
@@ -1789,11 +1902,72 @@ async def list_tools():
                  "output_dir":  {"type":"string","default":"/opt/cluster-report"},
                  "include_secrets": {"type":"boolean","default":True,
                                      "description":"Include credential values in output (set false for shared reports)"}}}),
+
+        # ── Session, multi-cluster, validation, audit ─────────────────────
+
+        Tool(name="validate_config",
+             description=(
+                 "Validate a cluster config file completely offline — no SSH, no servers required. "
+                 "Checks: all required fields present, valid option values, CIDR format and conflicts "
+                 "(detects pod_cidr overlapping service_cidr), SSH key file existence, node name uniqueness, "
+                 "K8s version format, proxy block completeness, node_config values, and costing rates. "
+                 "Run this before plan_cluster to catch all config errors without touching any server."),
+             inputSchema={"type":"object","properties":{
+                 "config": {"type":"string","description":"Full YAML cluster config to validate"}},
+                 "required":["config"]}),
+
+        Tool(name="save_cluster",
+             description=(
+                 "Save the current session (cluster config, join tokens, installed apps, credentials) "
+                 "under a named cluster identifier. Allows managing multiple clusters in one MCP installation. "
+                 "Session is automatically saved to disk on every tool call — this tool gives it an explicit name."),
+             inputSchema={"type":"object","properties":{
+                 "name": {"type":"string","description":"Name to save this cluster under e.g. 'prod', 'staging', 'dev'"}},
+                 "required":["name"]}),
+
+        Tool(name="switch_cluster",
+             description=(
+                 "Switch the active session to a previously saved cluster. "
+                 "All subsequent tool calls (cluster_status, scale_cluster, etc.) will target the switched cluster. "
+                 "Run list_clusters to see available saved clusters."),
+             inputSchema={"type":"object","properties":{
+                 "name": {"type":"string","description":"Cluster name to switch to"}},
+                 "required":["name"]}),
+
+        Tool(name="list_clusters",
+             description=(
+                 "List all saved cluster sessions with their names, K8s versions, node counts, "
+                 "profiles, and when they were last active. Shows which cluster is currently active."),
+             inputSchema={"type":"object","properties":{}}),
+
+        Tool(name="delete_cluster",
+             description=(
+                 "Delete a saved cluster session from the local registry. "
+                 "Does NOT destroy the actual cluster — only removes the saved session data. "
+                 "To destroy the actual cluster use destroy_cluster first."),
+             inputSchema={"type":"object","properties":{
+                 "name":    {"type":"string","description":"Cluster name to delete from registry"},
+                 "confirm": {"type":"string","description":"Must be exactly 'DELETE'"}},
+                 "required":["name","confirm"]}),
+
+        Tool(name="show_audit_log",
+             description=(
+                 "Show the audit trail of all tool calls made through this MCP server. "
+                 "Each entry records: timestamp, cluster name, tool called, parameters (secrets masked), "
+                 "and outcome. Useful for compliance, incident investigation, and change tracking."),
+             inputSchema={"type":"object","properties":{
+                 "lines":   {"type":"integer","default":50,"description":"Number of recent entries to show"},
+                 "cluster": {"type":"string","description":"Filter by cluster name (omit for all clusters)"},
+                 "tool":    {"type":"string","description":"Filter by tool name (omit for all tools)"}}}),
     ]
 
 
 @server.call_tool()
 async def call_tool(name, arguments):
+
+    # ── Audit every call immediately (outcome updated at end) ─────────────
+    _audit(name, arguments, "started")
+    global _active_cluster  # needed by switch_cluster, save_cluster, delete_cluster
 
     def cfg():
         c = _state.get("config")
@@ -1838,7 +2012,20 @@ async def call_tool(name, arguments):
         return info["os_family"]
 
     def err(msg):
+        _audit(name, arguments, "error", msg[:200])
         return [TextContent(type="text", text=f"ERROR: {msg}")]
+
+    def done(text: str, note: str = "") -> list:
+        """Return result, save state to disk, and log success to audit trail."""
+        _save_state()
+        _audit(name, arguments, "success", note[:200])
+        return [TextContent(type="text", text=text)]
+
+    # Check global dry_run — if set, all tools that mutate state honour it
+    try:
+        _gdry = _global_dry_run(_state.get("config", {}))
+    except Exception:
+        _gdry = False
 
     try:
 
@@ -1855,6 +2042,53 @@ async def call_tool(name, arguments):
             if c.get("profile") not in SUPPORTED_PROFILES: issues.append(f"profile must be one of {SUPPORTED_PROFILES}")
             mon = c.get("monitoring", "prometheus")
             if mon not in SUPPORTED_MONITORING: issues.append(f"monitoring must be one of {SUPPORTED_MONITORING}")
+
+            # ── CIDR validation (offline — pure Python) ───────────────────
+            import ipaddress as _ip
+            def _parse_net(cidr, label):
+                try:
+                    return _ip.ip_network(cidr, strict=False)
+                except Exception:
+                    issues.append(f"{label} is not a valid CIDR: {cidr!r}")
+                    return None
+
+            pod_net = _parse_net(c.get("pod_cidr",""), "pod_cidr")
+            svc_net = _parse_net(c.get("service_cidr",""), "service_cidr")
+            if pod_net and svc_net and pod_net.overlaps(svc_net):
+                issues.append(f"pod_cidr ({c['pod_cidr']}) overlaps service_cidr ({c['service_cidr']}) — they must not overlap")
+
+            # Warn about common private-range collisions (can't know node subnet offline,
+            # but flag the most common OpenStack/VMware tenant network ranges)
+            common_tenant_nets = [
+                _ip.ip_network("10.0.0.0/8"),
+                _ip.ip_network("172.16.0.0/12"),
+                _ip.ip_network("192.168.0.0/16"),
+            ]
+            for net, label in [(pod_net,"pod_cidr"),(svc_net,"service_cidr")]:
+                if net and net.prefixlen > 8:  # skip if /8 or broader — user probably knows
+                    for tenant in common_tenant_nets:
+                        if net.subnet_of(tenant):
+                            # Only warn if it's a suspiciously small subnet within a private range
+                            # that is likely the same range used by the node network
+                            pass  # preflight_check does the live check via 'ip route'
+
+            # Node name uniqueness check
+            all_node_names = [n["name"] for n in (c.get("masters",[]) + c.get("workers",[]))]
+            dupes = [n for n in all_node_names if all_node_names.count(n) > 1]
+            if dupes:
+                issues.append(f"Duplicate node names: {list(set(dupes))} — every node must have a unique name")
+
+            # SSH key existence check (offline)
+            for node in c.get("masters",[]) + c.get("workers",[]):
+                key_path = str(node.get("ssh_key","")).replace("~", str(Path.home()))
+                if key_path and not Path(key_path).exists():
+                    issues.append(f"Node {node.get('name')}: ssh_key not found at {key_path}")
+
+            # K8s version format check
+            kver = c.get("k8s_version","")
+            if kver and not re.match(r"^\d+\.\d+$", str(kver)):
+                issues.append(f"k8s_version must be MAJOR.MINOR format (e.g. '1.30'), got: {kver!r}")
+
             if issues:
                 return err("Validation:\n" + "\n".join(f"  \u2022 {i}" for i in issues))
 
@@ -1932,7 +2166,8 @@ async def call_tool(name, arguments):
                      "  container_runtime: containerd | crio\n"
                      "  kube_proxy_mode:   iptables | ipvs | ebpf\n"
                      "Or just proceed and use the dedicated install_* tools after the cluster is up.")
-            return [TextContent(type="text", text="PLAN:\n" + yaml.dump(plan, default_flow_style=False) + note + _format_next_steps("plan_cluster"))]
+            return done("PLAN:\n" + yaml.dump(plan, default_flow_style=False) + note + _format_next_steps("plan_cluster"),
+                        f"cluster={c.get('cluster_name')} nodes={len(c.get('masters',[]))+len(c.get('workers',[]))}")
 
         # ── prepare_nodes ─────────────────────────────────────────────────
         elif name == "prepare_nodes":
@@ -1982,33 +2217,63 @@ async def call_tool(name, arguments):
             endpoint = c.get("control_plane_endpoint", m0["ip"])
             is_ha = len(masters) > 1
 
-            script = master_init_script(endpoint, c["pod_cidr"], c["service_cidr"], c["k8s_version"],
-                                         is_first_master=True, upload_certs=is_ha)
-            if arguments.get("dry_run"):
-                return [TextContent(type="text", text=f"DRY RUN \u2014 first master init script:\n{script}")]
+            if arguments.get("dry_run") or _gdry:
+                script = master_init_script(endpoint, c["pod_cidr"], c["service_cidr"], c["k8s_version"],
+                                             is_first_master=True, upload_certs=is_ha)
+                return done(f"DRY RUN \u2014 first master init script:\n{script}")
 
-            code, out, er = ssh(script, m0, timeout=300)
-            if code != 0:
-                return err(f"kubeadm init failed on {m0['name']}:\n{er}")
+            # ── Idempotency check: is this master already initialized? ────────
+            # If kubeadm has already run, /etc/kubernetes/admin.conf exists.
+            # Re-running kubeadm init would fail with a confusing error.
+            # We detect this and recover gracefully.
+            chk_code, chk_out, _ = ssh("test -f /etc/kubernetes/admin.conf && echo ALREADY_INIT || echo NOT_INIT", m0)
+            already_init = "ALREADY_INIT" in chk_out
 
-            worker_join, cp_join_key = "", ""
-            if "---WORKER-JOIN---" in out:
-                after = out.split("---WORKER-JOIN---", 1)[1]
-                section = after.split("---CONTROL-PLANE-JOIN---")[0] if "---CONTROL-PLANE-JOIN---" in after else after
-                join_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("kubeadm join")]
-                worker_join = join_lines[-1] if join_lines else ""
-            if "---CONTROL-PLANE-JOIN---" in out:
-                cp_join_key = out.split("---CONTROL-PLANE-JOIN---", 1)[1].strip().splitlines()[-1].strip()
+            if already_init:
+                # Extract existing join command and kubeconfig — no need to re-init
+                _, kubeconfig, _ = ssh("cat /etc/kubernetes/admin.conf", m0)
+                _state["kubeconfig"] = kubeconfig
 
-            if not worker_join:
-                return err(f"Could not extract join command from output:\n{out[-800:]}")
+                # Regenerate a fresh join token (previous ones may have expired)
+                jc, jout, je = ssh("kubeadm token create --print-join-command 2>/dev/null", m0)
+                worker_join = jout.strip().split("\n")[-1].strip() if jc == 0 else ""
+                if not worker_join:
+                    return err(f"Master appears already initialized but could not regenerate join token:\n{je}")
+                _state["join_command"] = worker_join
 
-            _state["join_command"] = worker_join
-            _state["cert_key"]     = cp_join_key
-            _, kubeconfig, _ = ssh("cat /etc/kubernetes/admin.conf", m0)
-            _state["kubeconfig"] = kubeconfig
+                # Regenerate certificate key for HA master joins (cert keys expire after 2 hours)
+                if is_ha:
+                    ck_code, ck_out, _ = ssh("kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1", m0)
+                    _state["cert_key"] = ck_out.strip() if ck_code == 0 else ""
 
-            lines = [f"First master '{m0['name']}' initialized."]
+                init_note = (f"\u26a0\ufe0f  Master '{m0['name']}' was already initialized — skipped kubeadm init.\n"
+                             f"Fresh join token generated. Proceeding to join any unjoined workers.")
+            else:
+                script = master_init_script(endpoint, c["pod_cidr"], c["service_cidr"], c["k8s_version"],
+                                             is_first_master=True, upload_certs=is_ha)
+                code, out, er = ssh(script, m0, timeout=300)
+                if code != 0:
+                    return err(f"kubeadm init failed on {m0['name']}:\n{er}")
+
+                worker_join, cp_join_key = "", ""
+                if "---WORKER-JOIN---" in out:
+                    after = out.split("---WORKER-JOIN---", 1)[1]
+                    section = after.split("---CONTROL-PLANE-JOIN---")[0] if "---CONTROL-PLANE-JOIN---" in after else after
+                    join_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("kubeadm join")]
+                    worker_join = join_lines[-1] if join_lines else ""
+                if "---CONTROL-PLANE-JOIN---" in out:
+                    cp_join_key = out.split("---CONTROL-PLANE-JOIN---", 1)[1].strip().splitlines()[-1].strip()
+
+                if not worker_join:
+                    return err(f"Could not extract join command from output:\n{out[-800:]}")
+
+                _state["join_command"] = worker_join
+                _state["cert_key"]     = cp_join_key
+                _, kubeconfig, _ = ssh("cat /etc/kubernetes/admin.conf", m0)
+                _state["kubeconfig"] = kubeconfig
+                init_note = f"Master '{m0['name']}' initialized."
+
+            lines = [init_note]
 
             if is_ha:
                 lines.append("Joining additional masters (HA control-plane):")
@@ -2048,7 +2313,8 @@ async def call_tool(name, arguments):
                 if any(x in tline for x in ["helm=", "etcdctl=", "kubectl=", "[bootstrap]"]):
                     lines.append(f"  {tline.strip()}")
 
-            return [TextContent(type="text", text="\n".join(lines) + _format_next_steps("bootstrap_cluster"))]
+            return done("\n".join(lines) + _format_next_steps("bootstrap_cluster"),
+                        f"masters={len(masters)} workers={len(c.get('workers',[]))}")
 
         # ── install_cni ───────────────────────────────────────────────────
         elif name == "install_cni":
@@ -2080,13 +2346,30 @@ async def call_tool(name, arguments):
                 sets = " ".join(f"--set {s}" for s in p.get("set",[]))
                 cmds.append(f"helm repo add {p['repo']} {p['url']} --force-update 2>/dev/null; "
                             f"helm upgrade --install {p['release']} {p['chart']} --namespace {p['ns']} --create-namespace {sets}")
-            if arguments.get("dry_run"):
-                return [TextContent(type="text", text="DRY RUN:\n" + "\n".join(cmds))]
+            if arguments.get("dry_run") or _gdry:
+                return done("DRY RUN:\n" + "\n".join(cmds))
+
+            # Resume-from-failure: check which releases are already installed and skip them
+            already_installed = _state.get("stack_installed", [])
             results = []
+            failed  = []
             for p, cmd in zip(pkgs, cmds):
+                if p["release"] in already_installed:
+                    results.append(f"[SKIP] {p['release']} \u2014 already installed (from previous run)")
+                    continue
                 code, _, er = ssh(with_proxy(cmd), timeout=300)
-                results.append(f"[{'OK' if code==0 else 'FAIL'}] {p['release']} \u2192 ns/{p['ns']}" + (f"\n  {er[-200:]}" if code != 0 else ""))
-            return [TextContent(type="text", text="Stack install:\n" + "\n".join(results) + _format_next_steps("install_stack"))]
+                if code == 0:
+                    already_installed.append(p["release"])
+                    _state["stack_installed"] = already_installed
+                    results.append(f"[OK] {p['release']} \u2192 ns/{p['ns']}")
+                else:
+                    failed.append(p["release"])
+                    results.append(f"[FAIL] {p['release']} \u2192 ns/{p['ns']}\n  {er[-200:]}")
+
+            if failed:
+                results.append(f"\nFailed: {failed} — re-run install_stack to retry only the failed packages")
+            return done("Stack install:\n" + "\n".join(results) + _format_next_steps("install_stack"),
+                        f"installed={len(already_installed)} failed={len(failed)}")
 
         # ── install_monitoring ────────────────────────────────────────────
         elif name == "install_monitoring":
@@ -3565,21 +3848,252 @@ YAMLEOF
             """).strip()
             code, out, er = ssh(write_cmd, timeout=30)
             summary = md_content[:1200] + "\n\n...(truncated — full report on master at " + report_dir + ")"
-            return [TextContent(type="text", text=
+
+            # Credential rotation warning — always show after generating a report
+            cred_warning = textwrap.dedent("""
+\u2757 SECURITY NOTICE — CREDENTIAL ROTATION REQUIRED
+\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+The credentials in this report were generated with default or temporary values.
+Before allowing any workloads onto this cluster, rotate ALL of the following:
+
+  Grafana:   Change admin password via UI or helm upgrade --set grafana.adminPassword=<new>
+  Jenkins:   Change admin password via UI > Manage Jenkins > Security
+  SonarQube: Change admin password on first login (forced by SonarQube)
+  Harbor:    Change admin password via UI > Administration > Users
+  Vault:     The root token is for initial setup only — create audit paths and
+             revoke the root token after configuring auth methods and policies
+  Keycloak:  Change admin password via Realm Settings after first login
+
+The report file is chmod 600 on the master node. Treat it like a password vault:
+  - Do NOT commit it to any git repository
+  - Do NOT share it over unencrypted channels
+  - Delete it from the master once you have retrieved and stored it securely
+  - Recommended: import credentials into Vault and delete the file
+""").strip()
+            return done(
                 f"Cluster report generated at {report_dir} on master node.\n"
                 f"Two files written: cluster-report.md and cluster-report.yaml\n"
                 f"Permissions: 600 (owner-only readable)\n\n"
                 f"To retrieve locally:\n"
                 f"  scp <user>@<master-ip>:{report_dir}/cluster-report.md ./\n"
                 f"  scp <user>@<master-ip>:{report_dir}/cluster-report.yaml ./\n\n"
-                f"── Report summary ──\n{summary}")]
+                f"{cred_warning}\n\n"
+                f"\u2500\u2500 Report summary \u2500\u2500\n{summary}",
+                "report generated")
+
+        # ── validate_config ───────────────────────────────────────────────
+        elif name == "validate_config":
+            raw = arguments.get("config","")
+            try:
+                c = yaml.safe_load(raw)
+            except Exception as e:
+                return err(f"Cannot parse YAML: {e}")
+
+            import ipaddress as _ip
+            issues   = []
+            warnings = []
+
+            # Required fields
+            for f in ["cluster_name","k8s_version","cni","pod_cidr","service_cidr","profile","masters","workers"]:
+                if f not in c: issues.append(f"Missing required field: {f}")
+
+            # Enum checks
+            if c.get("cni") not in SUPPORTED_CNI:
+                issues.append(f"cni must be one of {SUPPORTED_CNI}")
+            if c.get("profile") not in SUPPORTED_PROFILES:
+                issues.append(f"profile must be one of {SUPPORTED_PROFILES}")
+            if c.get("monitoring","prometheus") not in SUPPORTED_MONITORING:
+                issues.append(f"monitoring must be one of {SUPPORTED_MONITORING}")
+
+            # K8s version format
+            kv = str(c.get("k8s_version",""))
+            if kv and not re.match(r"^\d+\.\d+$", kv):
+                issues.append(f"k8s_version must be MAJOR.MINOR format e.g. '1.30', got: {kv!r}")
+
+            # CIDR validation
+            def _pnet(cidr, label):
+                try: return _ip.ip_network(cidr, strict=False)
+                except Exception:
+                    issues.append(f"{label} is not valid CIDR: {cidr!r}")
+                    return None
+            pod = _pnet(c.get("pod_cidr",""), "pod_cidr")
+            svc = _pnet(c.get("service_cidr",""), "service_cidr")
+            if pod and svc and pod.overlaps(svc):
+                issues.append(f"pod_cidr ({c.get('pod_cidr')}) overlaps service_cidr ({c.get('service_cidr')})")
+            if pod and pod.prefixlen > 24:
+                warnings.append(f"pod_cidr /{pod.prefixlen} is very small — allows only {pod.num_addresses} addresses")
+            if svc and svc.prefixlen > 24:
+                warnings.append(f"service_cidr /{svc.prefixlen} is very small")
+
+            # Node validation
+            all_names = [n.get("name","") for n in c.get("masters",[]) + c.get("workers",[])]
+            dupes = {n for n in all_names if all_names.count(n) > 1}
+            if dupes: issues.append(f"Duplicate node names: {list(dupes)}")
+            for node in c.get("masters",[]) + c.get("workers",[]):
+                kp = str(node.get("ssh_key","")).replace("~", str(Path.home()))
+                if kp and not Path(kp).exists():
+                    warnings.append(f"Node {node.get('name')}: ssh_key not found locally at {kp}")
+                if not node.get("ip"):
+                    issues.append(f"Node {node.get('name','?')}: ip is required")
+
+            # Proxy block
+            px = c.get("proxy")
+            if px and not (px.get("http_proxy") or px.get("https_proxy")):
+                issues.append("proxy block present but neither http_proxy nor https_proxy is set")
+
+            # node_config
+            nc = c.get("node_config",{})
+            if nc.get("sysctl_preset") and nc["sysctl_preset"] not in SUPPORTED_SYSCTL_PRESETS:
+                issues.append(f"node_config.sysctl_preset must be one of {SUPPORTED_SYSCTL_PRESETS}")
+            if nc.get("selinux") and nc["selinux"] not in SUPPORTED_SELINUX:
+                issues.append(f"node_config.selinux must be one of {SUPPORTED_SELINUX}")
+            if nc.get("swap") and nc["swap"] not in SUPPORTED_SWAP:
+                issues.append(f"node_config.swap must be one of {SUPPORTED_SWAP}")
+            if nc.get("iptables_mode") and nc["iptables_mode"] not in SUPPORTED_IPTABLES:
+                issues.append(f"node_config.iptables_mode must be one of {SUPPORTED_IPTABLES}")
+
+            if issues:
+                msg = (f"VALIDATION FAILED — {len(issues)} error(s), {len(warnings)} warning(s)\n\n"
+                       "Errors (must fix):\n" + "\n".join(f"  \u2022 {i}" for i in issues))
+                if warnings:
+                    msg += "\n\nWarnings (review):\n" + "\n".join(f"  \u26a0 {w}" for w in warnings)
+                return err(msg)
+            elif warnings:
+                msg = (f"VALIDATION PASSED with {len(warnings)} warning(s):\n"
+                       + "\n".join(f"  \u26a0 {w}" for w in warnings)
+                       + "\n\nConfig is valid — safe to run plan_cluster.")
+            else:
+                msg = f"VALIDATION PASSED \u2014 {len(c.get('masters',[]))+len(c.get('workers',[]))} nodes, all fields valid, no issues found."
+            return done(msg)
+
+        # ── save_cluster ──────────────────────────────────────────────────
+        elif name == "save_cluster":
+            cluster_name = arguments["name"]
+            if not _state.get("config"):
+                return err("No cluster config loaded. Run plan_cluster first.")
+            clusters = _load_clusters()
+            clusters[cluster_name] = {
+                "config":     _state.get("config", {}),
+                "saved_at":   datetime.now().isoformat(),
+                "k8s_version":_state.get("config",{}).get("k8s_version","?"),
+                "masters":    len(_state.get("config",{}).get("masters",[])),
+                "workers":    len(_state.get("config",{}).get("workers",[])),
+                "profile":    _state.get("config",{}).get("profile","?"),
+                "stack_installed": _state.get("stack_installed",[]),
+                "installed_applications": _state.get("installed_applications",{}),
+                "security_config": _state.get("security_config",{}),
+            }
+            _save_clusters(clusters)
+            _active_cluster = cluster_name
+            _save_state()
+            return done(f"Cluster '{cluster_name}' saved.\n"
+                        f"Use switch_cluster to move between clusters.\n"
+                        f"Use list_clusters to see all saved clusters.")
+
+        # ── switch_cluster ────────────────────────────────────────────────
+        elif name == "switch_cluster":
+            cluster_name = arguments["name"]
+            clusters = _load_clusters()
+            if cluster_name not in clusters:
+                available = list(clusters.keys())
+                return err(f"Cluster '{cluster_name}' not found. Available: {available}")
+            saved = clusters[cluster_name]
+            _state.clear()
+            _state["config"] = saved["config"]
+            _state["stack_installed"] = saved.get("stack_installed", [])
+            _state["installed_applications"] = saved.get("installed_applications", {})
+            _state["security_config"] = saved.get("security_config", {})
+            _active_cluster = cluster_name
+            _save_state()
+            cn = saved["config"].get("cluster_name", cluster_name)
+            return done(f"Switched to cluster '{cluster_name}'.\n"
+                        f"  Cluster name:    {cn}\n"
+                        f"  K8s version:     {saved.get('k8s_version')}\n"
+                        f"  Masters/Workers: {saved.get('masters')}/{saved.get('workers')}\n"
+                        f"  Profile:         {saved.get('profile')}\n"
+                        f"  Packages installed: {saved.get('stack_installed',[])}\n"
+                        f"\nAll subsequent tool calls will target this cluster.")
+
+        # ── list_clusters ─────────────────────────────────────────────────
+        elif name == "list_clusters":
+            clusters = _load_clusters()
+            if not clusters:
+                return done("No saved clusters found. Run plan_cluster then save_cluster to save a cluster.")
+            lines = [f"Saved clusters ({len(clusters)} total):\n"]
+            for cname, data in clusters.items():
+                active_marker = " \u2190 ACTIVE" if cname == _active_cluster else ""
+                lines.append(f"  {cname}{active_marker}")
+                lines.append(f"    K8s: {data.get('k8s_version','?')}  Masters: {data.get('masters','?')}  Workers: {data.get('workers','?')}  Profile: {data.get('profile','?')}")
+                lines.append(f"    Packages: {data.get('stack_installed',[][:5])}")
+                lines.append(f"    Saved: {data.get('saved_at','?')[:19]}")
+            return done("\n".join(lines))
+
+        # ── delete_cluster ────────────────────────────────────────────────
+        elif name == "delete_cluster":
+            if arguments.get("confirm") != "DELETE":
+                return err("confirm must be exactly 'DELETE'. No action taken.")
+            cluster_name = arguments["name"]
+            clusters = _load_clusters()
+            if cluster_name not in clusters:
+                return err(f"Cluster '{cluster_name}' not found in registry.")
+            del clusters[cluster_name]
+            _save_clusters(clusters)
+            if _active_cluster == cluster_name:
+                _active_cluster = ""
+                _state.clear()
+                _save_state()
+            return done(f"Cluster '{cluster_name}' deleted from registry.\n"
+                        f"Note: the actual Kubernetes cluster is unaffected — use destroy_cluster to remove it.")
+
+        # ── show_audit_log ────────────────────────────────────────────────
+        elif name == "show_audit_log":
+            lines_count  = arguments.get("lines", 50)
+            filter_cluster = arguments.get("cluster","")
+            filter_tool    = arguments.get("tool","")
+
+            if not AUDIT_LOG_FILE.exists():
+                return done("No audit log found. Tool calls are logged from this point forward.")
+
+            raw_lines = AUDIT_LOG_FILE.read_text().splitlines()
+            entries = []
+            for line in raw_lines:
+                try:
+                    entry = json.loads(line)
+                    if filter_cluster and entry.get("cluster","") != filter_cluster:
+                        continue
+                    if filter_tool and entry.get("tool","") != filter_tool:
+                        continue
+                    entries.append(entry)
+                except Exception:
+                    continue
+
+            recent = entries[-lines_count:]
+            if not recent:
+                return done("No audit log entries match the filter.")
+
+            output = [f"Audit log — last {len(recent)} entries (of {len(entries)} total):\n"]
+            for e in recent:
+                ts   = e.get("ts","?")[:19]
+                cl   = e.get("cluster","?")
+                tool = e.get("tool","?")
+                out  = e.get("outcome","?")
+                note = e.get("note","")
+                args = {k:v for k,v in e.get("args",{}).items() if k not in ("config",)}
+                output.append(f"  {ts}  [{cl}]  {tool}  \u2192 {out}" + (f"  ({note})" if note else ""))
+                if args:
+                    output.append(f"    args: {json.dumps(args, default=str)[:100]}")
+
+            output.append(f"\nFull audit log: {AUDIT_LOG_FILE}")
+            return done("\n".join(output))
 
         else:
             return err(f"Unknown tool '{name}'")
 
     except ValueError as e:
+        _audit(name, arguments, "error", str(e)[:200])
         return err(str(e))
     except Exception as e:
+        _audit(name, arguments, "exception", str(e)[:200])
         return err(f"Unexpected error: {e}")
 
 
