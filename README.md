@@ -1,7 +1,7 @@
 # k8s-mcp-v1 — Kubernetes Cluster Factory MCP
 
 > **Version:** k8s-mcp-v1  
-> **Tools:** 34  
+> **Tools:** 41  
 > **Lines of code:** ~3,300  
 > **Tested on:** RHEL 8+, Ubuntu 20.04+, CentOS Stream 8+, Rocky Linux 8+, AlmaLinux 8+, SUSE 15+  
 > **Works on:** Any on-premises bare metal, OpenStack, VMware, AWS, GCP, Azure  
@@ -299,7 +299,7 @@ Common errors and fixes:
 claude
 ```
 
-You are now talking to Claude with all 34 k8s-factory tools available. Type `/mcp` inside the session to confirm the tools are loaded.
+You are now talking to Claude with all 41 k8s-factory tools available. Type `/mcp` inside the session to confirm the tools are loaded.
 
 ---
 
@@ -2174,7 +2174,7 @@ Inside the session:
 > /mcp
 ```
 
-You should see `k8s-factory` with 34 tools listed. You are ready.
+You should see `k8s-factory` with 41 tools listed. You are ready.
 
 ---
 
@@ -2477,12 +2477,12 @@ claude mcp add k8s-factory -- python3.11 ~/mcp-servers/k8s_factory_mcp.py
 
 ### Verifying everything is working
 
-Run this inside a `claude` session to confirm all 34 tools are available:
+Run this inside a `claude` session to confirm all 41 tools are available:
 ```
 > /mcp
 ```
 
-You should see `k8s-factory` with 34 tools. If you see fewer, the server loaded but some tools failed to parse — run `python3.11 ~/mcp-servers/k8s_factory_mcp.py` directly to see the error.
+You should see `k8s-factory` with 41 tools. If you see fewer, the server loaded but some tools failed to parse — run `python3.11 ~/mcp-servers/k8s_factory_mcp.py` directly to see the error.
 
 ---
 
