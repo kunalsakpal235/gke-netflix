@@ -2,7 +2,7 @@
 k8s_factory_mcp.py — k8s-mcp-v1
 =================================
 K8s Cluster Factory MCP Server
-Official release: k8s-mcp-v1  |  Tools: 34  |  Lines: ~3300
+Official release: k8s-mcp-v1  |  Tools: 41  |  Lines: ~4100
 
 Provisions, manages, scales, upgrades, secures, and reports on
 Kubernetes clusters on any on-premises or cloud infrastructure,
