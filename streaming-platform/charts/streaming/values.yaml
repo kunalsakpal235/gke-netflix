@@ -1,0 +1,20 @@
+service:
+  name: api-gateway
+  containerPort: 8080
+replicaCount: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill
+image:
+  repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway
+  tag: latest
+serviceAccountName: streaming-workloads
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits:   { cpu: 300m, memory: 256Mi }
+probes:
+  liveness: /healthz
+  readiness: /readyz
+autoscaling: { enabled: true, minReplicas: 1, maxReplicas: 3, targetCPU: 70 }   # maxReplicas kept low for an ~8 vCPU quota; raise it if your project has more
+pdb: { minAvailable: 1 }
+spot: true
+ingress:
+  enabled: false
+  path: /api

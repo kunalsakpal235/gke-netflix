@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: streaming
+  labels:
+    app: frontend
+spec:
+  replicas: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill, then scale back
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      serviceAccountName: streaming-workloads
+      containers:
+        - name: frontend
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend:v3
+          ports:
+            - containerPort: 3000
+          env:
+            - name: GATEWAY_URL
+              value: "http://api-gateway"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3000
+            initialDelaySeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

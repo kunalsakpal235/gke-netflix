@@ -1,0 +1,9 @@
+node_modules/
+.next/
+build/
+target/
+*.class
+.gradle/
+dist/
+.env
+*.log

@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: transcode-video-123
+  namespace: streaming
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      serviceAccountName: streaming-workloads
+      restartPolicy: Never
+      containers:
+        - name: transcoder
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/transcoder:v3
+          env:
+            - name: VIDEO_ID
+              value: "123"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

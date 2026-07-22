@@ -1,0 +1,24 @@
+project_id = "devops-1-502311"
+region     = "asia-south1"
+zone       = "asia-south1-a"
+
+# --- pick your cluster shape ---
+cluster_mode = "autopilot"     # or "standard"
+# standard-only knobs:
+machine_type = "e2-medium"
+use_spot     = true
+min_nodes    = 0
+max_nodes    = 3
+
+# --- network: create new, or reuse an existing VPC ---
+create_network = true
+# create_network = false
+# existing_network        = "my-vpc"
+# existing_subnet         = "my-subnet"
+# existing_pods_range     = "pods"
+# existing_services_range = "services"
+enable_nat = false
+
+# --- optional managed data (cost when on) ---
+enable_cloud_sql   = false
+enable_memorystore = false

@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "streaming.name" . }}
+  labels: { app: {{ include "streaming.name" . }} }
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: { matchLabels: { app: {{ include "streaming.name" . }} } }
+  template:
+    metadata: { labels: { app: {{ include "streaming.name" . }} } }
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      containers:
+        - name: {{ include "streaming.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports: [{ containerPort: {{ .Values.service.containerPort }} }]
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          livenessProbe:  { httpGet: { path: {{ .Values.probes.liveness }},  port: {{ .Values.service.containerPort }} }, initialDelaySeconds: 10 }
+          readinessProbe: { httpGet: { path: {{ .Values.probes.readiness }}, port: {{ .Values.service.containerPort }} }, initialDelaySeconds: 5 }
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+      {{- if .Values.spot }}
+      nodeSelector: { cloud.google.com/gke-spot: "true" }
+      tolerations:
+        - { key: cloud.google.com/gke-spot, operator: Equal, value: "true", effect: NoSchedule }
+      {{- end }}

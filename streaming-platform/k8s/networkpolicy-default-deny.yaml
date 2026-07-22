@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: streaming }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# You MUST also allow DNS egress or every lookup fails:
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: streaming }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

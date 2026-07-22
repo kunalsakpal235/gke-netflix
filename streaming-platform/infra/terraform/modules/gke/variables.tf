@@ -1,0 +1,17 @@
+variable "project_id" { type = string }
+variable "name" { type = string }
+variable "region" { type = string }
+variable "zone" { type = string }
+variable "cluster_mode" { type = string }
+variable "network" { type = string }
+variable "subnetwork" { type = string }
+variable "pods_range_name" { type = string }
+variable "services_range_name" { type = string }
+variable "release_channel" { type = string }
+variable "enable_dataplane_v2" { type = bool }
+variable "enable_binary_authorization" { type = bool }
+variable "machine_type" { type = string }
+variable "min_nodes" { type = number }
+variable "max_nodes" { type = number }
+variable "use_spot" { type = bool }
+variable "disk_size_gb" { type = number }

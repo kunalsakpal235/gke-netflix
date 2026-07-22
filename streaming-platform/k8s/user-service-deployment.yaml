@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: streaming
+  labels:
+    app: user-service
+spec:
+  replicas: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill, then scale back
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      serviceAccountName: streaming-workloads
+      containers:
+        - name: user-service
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service:v3
+          ports:
+            - containerPort: 8080
+          env:
+            - { name: DB_HOST, value: "postgres-postgresql" }
+            - { name: DB_PORT, value: "5432" }
+            - { name: DB_NAME, value: "streaming" }
+            - { name: DB_USER, value: "app" }
+            - { name: DB_PASSWORD_FILE, value: "/mnt/secrets/db-password" }
+          volumeMounts:
+            - name: db-secrets
+              mountPath: /mnt/secrets
+              readOnly: true
+          resources:
+            requests:
+              cpu: 150m
+              memory: 384Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 15
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: db-secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: db-secrets
