@@ -18,7 +18,7 @@ spec:
       serviceAccountName: streaming-workloads
       containers:
         - name: catalog-service
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service:40ebf65
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service:v3
           ports:
             - containerPort: 8080
           env:

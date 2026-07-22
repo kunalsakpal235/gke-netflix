@@ -1,0 +1,17 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: streaming-gateway
+  namespace: streaming
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: streaming-gateway-ip
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
