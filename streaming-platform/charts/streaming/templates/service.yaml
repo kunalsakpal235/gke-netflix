@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "streaming.name" . }}
+spec:
+  type: ClusterIP
+  selector: { app: {{ include "streaming.name" . }} }
+  ports:
+    - { name: http, port: 80, targetPort: {{ .Values.service.containerPort }} }

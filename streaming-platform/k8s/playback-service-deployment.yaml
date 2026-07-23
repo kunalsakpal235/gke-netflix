@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: playback-service
+  namespace: streaming
+  labels:
+    app: playback-service
+spec:
+  replicas: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill, then scale back
+  selector:
+    matchLabels:
+      app: playback-service
+  template:
+    metadata:
+      labels:
+        app: playback-service
+    spec:
+      serviceAccountName: streaming-workloads
+      containers:
+        - name: playback-service
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service:latest
+          ports:
+            - containerPort: 8093
+          env:
+            - { name: PORT, value: "8093" }
+            - { name: VIDEO_BUCKET, value: "devops-1-502311-video" }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8093
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8093
+            initialDelaySeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
