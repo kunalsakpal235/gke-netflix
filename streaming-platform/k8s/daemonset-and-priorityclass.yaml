@@ -1,0 +1,36 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: sysctl-daemonset-priority
+value: 999999999
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: max-map-count-setter
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels: { name: max-map-count-setter }
+  template:
+    metadata:
+      labels: { name: max-map-count-setter }
+    spec:
+      priorityClassName: sysctl-daemonset-priority
+      nodeSelector:
+        cloud.google.com/compute-class: "Balanced"
+      initContainers:
+        - name: max-map-count-setter
+          image: docker.io/bash:5.2.15
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          command: ["/usr/local/bin/bash", "-e", "-c", "echo 262144 > /proc/sys/vm/max_map_count"]
+          resources:
+            requests: { cpu: 10m, memory: 10Mi }
+            limits: { cpu: 50m, memory: 32Mi }
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
