@@ -1,5 +1,5 @@
 pipeline {
-  agent { kubernetes { yamlFile 'jenkins/agent-pod.yaml' } }
+  agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
   environment {
     REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
     SVC = 'api-gateway'
