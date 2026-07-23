@@ -18,7 +18,7 @@ spec:
       serviceAccountName: streaming-workloads
       containers:
         - name: user-service
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service:latest
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service:v4
           ports:
             - containerPort: 8092
           env:

@@ -18,7 +18,7 @@ spec:
       serviceAccountName: streaming-workloads
       containers:
         - name: frontend
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend:latest
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend:v4
           ports:
             - containerPort: 3000
           env:

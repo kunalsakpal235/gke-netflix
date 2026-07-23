@@ -18,7 +18,7 @@ spec:
       serviceAccountName: streaming-workloads
       containers:
         - name: playback-service
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service:latest
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service:v4
           ports:
             - containerPort: 8093
           env:

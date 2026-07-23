@@ -18,7 +18,7 @@ spec:
       serviceAccountName: streaming-workloads
       containers:
         - name: api-gateway
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway:latest
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway:v4
           ports:
             - containerPort: 8080
           env:
@@ -50,10 +50,3 @@ spec:
             capabilities:
               drop:
                 - ALL
-      nodeSelector:
-        cloud.google.com/gke-spot: "true"
-      tolerations:
-        - key: cloud.google.com/gke-spot
-          operator: Equal
-          value: "true"
-          effect: NoSchedule

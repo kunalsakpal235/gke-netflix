@@ -11,7 +11,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: transcoder
-          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/transcoder:latest
+          image: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/transcoder:v4
           env:
             - name: VIDEO_ID
               value: "123"
