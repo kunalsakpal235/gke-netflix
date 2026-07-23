@@ -7,10 +7,23 @@ pipeline {
   }
   stages {
     stage('Checkout') { steps { checkout scm } }
+//   stage('SonarQube') {
+//      steps { container('tools') {
+//        withSonarQubeEnv('sonar') { sh 'echo run sonar-scanner here' }
+ //     } }
     stage('SonarQube') {
-      steps { container('tools') {
-        withSonarQubeEnv('sonar') { sh 'echo run sonar-scanner here' }
-      } }
+    container('sonar-scanner') { // Ensure this matches the container name in your agent-pod.yaml
+        withSonarQubeEnv('sonar') {
+            sh '''
+            sonar-scanner \
+              -Dsonar.projectKey=streaming-platform-api \
+              -Dsonar.sources=streaming-platform/ \
+              -Dsonar.host.url=${SONAR_HOST_URL} \
+              -Dsonar.login=${SONAR_AUTH_TOKEN}
+            '''
+        }
+    }
+}
     }
     stage('Quality Gate') { steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } } }
     stage('Build (kaniko)') {
