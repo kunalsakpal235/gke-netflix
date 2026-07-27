@@ -8,22 +8,29 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 5Gi }
-        limits: { ephemeral-storage: 5Gi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: tools
-      image: alpine:3.20
+      image: alpine:3.20               # holds git/yq, installed inline in the GitOps commit stage
       command: ["cat"]
       tty: true
+      resources:
+        requests: { ephemeral-storage: 512Mi }
+        limits: { ephemeral-storage: 512Mi }
     - name: sonar-scanner
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
       tty: true
+      resources:
+        requests: { ephemeral-storage: 1Gi }
+        limits: { ephemeral-storage: 1Gi }
     - name: gradle
       image: gradle:8.9-jdk21-alpine   # same image catalog-service's own Dockerfile build stage uses
       command: ["cat"]
       tty: true
       resources:
-        requests: { cpu: 250m, memory: 512Mi }
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+        limits: { ephemeral-storage: 512Mi }
     - name: trivy
       image: aquasec/trivy:latest
       command: ["cat"]
