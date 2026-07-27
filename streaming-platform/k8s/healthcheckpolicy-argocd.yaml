@@ -1,0 +1,20 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: argocd-healthcheck
+  namespace: argocd
+spec:
+  default:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 8080
+        requestPath: /healthz
+  targetRef:
+    group: ""
+    kind: Service
+    name: argocd-server

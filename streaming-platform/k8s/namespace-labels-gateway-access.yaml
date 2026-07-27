@@ -1,0 +1,2 @@
+# Apply with: kubectl label namespace streaming cicd argocd gateway-access=streaming-gw --overwrite
+# (kept here as documentation of the required label; `kubectl label` is imperative, not a manifest to apply -f)

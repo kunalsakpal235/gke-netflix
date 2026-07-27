@@ -14,4 +14,7 @@ spec:
       port: 80
       allowedRoutes:
         namespaces:
-          from: Same
+          from: Selector
+          selector:
+            matchLabels:
+              gateway-access: streaming-gw

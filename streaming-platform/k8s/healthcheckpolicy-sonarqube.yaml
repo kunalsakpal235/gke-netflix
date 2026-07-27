@@ -1,0 +1,20 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: sonarqube-healthcheck
+  namespace: cicd
+spec:
+  default:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        port: 9000
+        requestPath: /sonarqube/api/system/status
+  targetRef:
+    group: ""
+    kind: Service
+    name: sonarqube-sonarqube

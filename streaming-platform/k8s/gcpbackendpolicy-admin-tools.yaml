@@ -1,0 +1,38 @@
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: jenkins-backend-policy
+  namespace: cicd
+spec:
+  default:
+    securityPolicy: admin-tools-allowlist
+  targetRef:
+    group: ""
+    kind: Service
+    name: jenkins
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: sonarqube-backend-policy
+  namespace: cicd
+spec:
+  default:
+    securityPolicy: admin-tools-allowlist
+  targetRef:
+    group: ""
+    kind: Service
+    name: sonarqube-sonarqube
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: argocd-backend-policy
+  namespace: argocd
+spec:
+  default:
+    securityPolicy: admin-tools-allowlist
+  targetRef:
+    group: ""
+    kind: Service
+    name: argocd-server
