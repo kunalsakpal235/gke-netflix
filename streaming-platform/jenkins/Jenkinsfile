@@ -26,7 +26,7 @@ pipeline {
       } }
     }
     stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' } } }
-    stage('Push (kaniko)') { steps { container('kaniko') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
+    stage('Push (kaniko)') { steps { container('kaniko-push') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
     stage('Approval') { steps { input message: 'Deploy to dev?', ok: 'Ship it' } }
     stage('GitOps commit') {
       steps { container('tools') {
