@@ -2,8 +2,8 @@ pipeline {
   agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
   environment {
     REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
-    SVC = 'api-gateway'
-    IMAGE = "${REGISTRY}/api-gateway:${GIT_COMMIT}"
+    SVC = 'catalog-service'
+    IMAGE = "${REGISTRY}/${SVC}:${GIT_COMMIT}"
   }
   stages {
     stage('Checkout') { steps { checkout scm } }
