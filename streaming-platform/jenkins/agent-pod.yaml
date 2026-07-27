@@ -25,3 +25,6 @@ spec:
       image: aquasec/trivy:latest
       command: ["cat"]
       tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 2Gi }
+        limits: { ephemeral-storage: 4Gi }
