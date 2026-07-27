@@ -8,6 +8,10 @@ spec:
       command: ["/busybox/cat"]
       tty: true
     - name: tools
-      image: alpine:3.20               # holds trivy, git, yq, sonar-scanner (install in stage)
+      image: alpine:3.20               # holds trivy, git, yq
+      command: ["cat"]
+      tty: true
+    - name: sonar-scanner
+      image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
       tty: true
