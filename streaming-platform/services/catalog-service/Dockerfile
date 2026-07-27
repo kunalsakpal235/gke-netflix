@@ -4,6 +4,7 @@ WORKDIR /src
 COPY . .
 RUN gradle clean bootJar --no-daemon
 FROM eclipse-temurin:21-jre-alpine
+RUN apk upgrade --no-cache
 WORKDIR /app
 RUN addgroup -g 1000 -S app && adduser -u 1000 -S app -G app
 COPY --from=build --chown=app:app /src/build/libs/*.jar app.jar
