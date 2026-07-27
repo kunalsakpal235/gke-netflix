@@ -36,6 +36,7 @@ pipeline {
             curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
             chmod +x /usr/local/bin/yq
             yq -i ".image.tag = \\"${GIT_COMMIT}\\"" streaming-platform/gitops/environments/dev/values.yaml
+            git config --global --add safe.directory "$WORKSPACE"
             git config user.email ci@lab && git config user.name jenkins
             git commit -am "ci: deploy ${SVC} ${GIT_COMMIT}"
             git push https://$U:$P@github.com/YOUR_GH/streaming-platform.git HEAD:main
