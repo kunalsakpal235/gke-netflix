@@ -37,6 +37,7 @@ pipeline {
             chmod +x /usr/local/bin/yq
             yq -i ".image.tag = \\"${GIT_COMMIT}\\"" streaming-platform/gitops/environments/dev/values.yaml
             git config --global --add safe.directory "$WORKSPACE"
+ 	    git config --global --add safe.directory /home/jenkins/agent/workspace/streaming-pipeline
             git config user.email ci@lab && git config user.name jenkins
             git commit -am "ci: deploy ${SVC} ${GIT_COMMIT}"
             git push https://$U:$P@github.com/YOUR_GH/streaming-platform.git HEAD:main
