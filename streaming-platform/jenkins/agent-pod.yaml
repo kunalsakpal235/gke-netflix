@@ -8,7 +8,7 @@ spec:
       command: ["/busybox/cat"]
       tty: true
     - name: tools
-      image: alpine:3.20               # holds trivy, git, yq
+      image: alpine:3.20
       command: ["cat"]
       tty: true
     - name: sonar-scanner
@@ -21,3 +21,7 @@ spec:
       tty: true
       resources:
         requests: { cpu: 250m, memory: 512Mi }
+    - name: trivy
+      image: aquasec/trivy:latest
+      command: ["cat"]
+      tty: true

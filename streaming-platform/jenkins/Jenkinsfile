@@ -25,13 +25,16 @@ pipeline {
         sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
       } }
     }
-    stage('Trivy') { steps { container('tools') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' } } }
+    stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' } } }
     stage('Push (kaniko)') { steps { container('kaniko') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
     stage('Approval') { steps { input message: 'Deploy to dev?', ok: 'Ship it' } }
     stage('GitOps commit') {
       steps { container('tools') {
         withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
           sh '''
+            apk add --no-cache git curl
+            curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+            chmod +x /usr/local/bin/yq
             yq -i ".image.tag = \"${GIT_COMMIT}\"" streaming-platform/gitops/environments/dev/values.yaml
             git config user.email ci@lab && git config user.name jenkins
             git commit -am "ci: deploy ${SVC} ${GIT_COMMIT}"
