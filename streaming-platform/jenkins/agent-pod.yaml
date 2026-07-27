@@ -15,3 +15,9 @@ spec:
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
       tty: true
+    - name: gradle
+      image: gradle:8.9-jdk21-alpine   # same image catalog-service's own Dockerfile build stage uses
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi }

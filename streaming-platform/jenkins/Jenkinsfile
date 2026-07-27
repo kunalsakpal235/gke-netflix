@@ -7,10 +7,15 @@ pipeline {
   }
   stages {
     stage('Checkout') { steps { checkout scm } }
+    stage('Compile') {
+      steps { container('gradle') {
+        sh "cd streaming-platform/services/${SVC} && gradle compileJava --no-daemon"
+      } }
+    }
     stage('SonarQube') {
       steps { container('sonar-scanner') {
         withSonarQubeEnv('sonar') {
-          sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
+          sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
         }
       } }
     }
