@@ -5,7 +5,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/YOUR_GH/streaming-platform.git
-    targetRevision: main
+    targetRevision: dev
     path: charts/streaming
     helm:
       valueFiles: ["../../gitops/environments/dev/values.yaml"]
