@@ -18,12 +18,12 @@ spec:
         requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1Gi }
         limits: { ephemeral-storage: 1Gi }
     - name: tools
-      image: alpine:3.20               # holds git/yq, installed inline in the GitOps commit stage
+      image: alpine:3.20               # holds git/yq/argocd-cli, all installed inline as needed
       command: ["cat"]
       tty: true
       resources:
-        requests: { ephemeral-storage: 256Mi }
-        limits: { ephemeral-storage: 256Mi }
+        requests: { ephemeral-storage: 512Mi }
+        limits: { ephemeral-storage: 512Mi }
     - name: sonar-scanner
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]

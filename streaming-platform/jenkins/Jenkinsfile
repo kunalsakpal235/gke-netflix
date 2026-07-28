@@ -37,10 +37,22 @@ pipeline {
             chmod +x /usr/local/bin/yq
             yq -i ".image.tag = \\"${GIT_COMMIT}\\"" streaming-platform/gitops/environments/dev/values.yaml
             git config --global --add safe.directory "$WORKSPACE"
- 	    git config --global --add safe.directory /home/jenkins/agent/workspace/streaming-pipeline
             git config user.email ci@lab && git config user.name jenkins
             git commit -am "ci: deploy ${SVC} ${GIT_COMMIT}"
-	    git push https://$U:$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+            git push https://$U:$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+          '''
+        }
+      } }
+    }
+    stage('ArgoCD sync & verify') {
+      steps { container('tools') {
+        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          sh '''
+            curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
+            chmod +x /usr/local/bin/argocd
+            argocd login argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            argocd app sync streaming-dev
+            argocd app wait streaming-dev --health --timeout 300
           '''
         }
       } }

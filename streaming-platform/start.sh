@@ -7,7 +7,17 @@
 #
 # Safe to run from a fresh terminal/session — explicitly sets project/region context
 # rather than assuming gcloud's ambient config is already correct.
+#
+# --full flag: use this ONLY if you ran `stop.sh --full` last time (which deleted the
+# Gateway/HTTPRoute/policy layer). Re-applies those manifests from the repo. It does NOT
+# recreate the Cloud Armor policy or its specific allowed-IP rules — those are personal
+# (your jump server, laptop, anyone else you'd added) and aren't safely re-creatable from
+# a generic file. You'll need to redo that part yourself; see "Exposing admin tools" in
+# the runbook for the exact commands.
 set -uo pipefail
+
+FULL=false
+[ "${1:-}" = "--full" ] && FULL=true
 
 PROJECT_ID="${PROJECT_ID:-devops-1-502311}"
 REGION="${REGION:-asia-south1}"
@@ -45,7 +55,7 @@ kubectl -n streaming rollout status statefulset postgres-postgresql --timeout=18
 kubectl -n streaming rollout status statefulset redis-master --timeout=180s 2>/dev/null || true
 
 echo "=== 4/5 Scaling up CI/CD tools (namespace: cicd) and ArgoCD (namespace: argocd) ==="
-kubectl scale statefulset jenkins sonarqube-sonarqube -n cicd --replicas=1 2>/dev/null || true
+kubectl scale statefulset sonarqube-db-postgresql jenkins sonarqube-sonarqube -n cicd --replicas=1 2>/dev/null || true
 kubectl scale deployment argocd-redis argocd-repo-server -n argocd --replicas=1 2>/dev/null || true
 kubectl scale statefulset argocd-application-controller -n argocd --replicas=1 2>/dev/null || true
 kubectl scale deployment argocd-dex-server argocd-server argocd-applicationset-controller \
@@ -58,6 +68,22 @@ kubectl scale deployment api-gateway frontend catalog-service user-service playb
 echo "=== Scaling up monitoring (namespace: monitoring), if installed ==="
 kubectl scale statefulset -n monitoring -l app.kubernetes.io/name=prometheus --replicas=1 2>/dev/null || true
 kubectl scale deployment -n monitoring -l app.kubernetes.io/name=grafana --replicas=1 2>/dev/null || true
+
+if [ "$FULL" = true ]; then
+  echo
+  echo "=== --full: re-applying the Gateway/Cloud Armor layer manifests ==="
+  kubectl label namespace streaming cicd argocd gateway-access=streaming-gw --overwrite
+  kubectl apply -f k8s/gateway.yaml
+  kubectl apply -f k8s/httproute-cicd.yaml -f k8s/httproute-argocd.yaml
+  echo "  NOTE: the Cloud Armor policy itself was NOT recreated — its allowed IPs are"
+  echo "  personal and can't be safely guessed. Recreate it and re-add your IPs manually:"
+  echo "  gcloud compute security-policies create admin-tools-allowlist ..."
+  echo "  (see 'Exposing admin tools' in the runbook for the exact commands)"
+  echo "  Then re-apply the GCPBackendPolicy + HealthCheckPolicy files once that policy exists:"
+  echo "  kubectl apply -f k8s/gcpbackendpolicy-admin-tools.yaml"
+  echo "  kubectl apply -f k8s/healthcheckpolicy-api-gateway.yaml -f k8s/healthcheckpolicy-jenkins.yaml \\"
+  echo "    -f k8s/healthcheckpolicy-sonarqube.yaml -f k8s/healthcheckpolicy-argocd.yaml"
+fi
 
 echo
 echo "=== Watching pods come up — Ctrl+C once everything shows Running/Ready ==="
