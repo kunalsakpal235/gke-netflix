@@ -43,7 +43,7 @@ pipeline {
             git config user.email ci@lab && git config user.name jenkins
             yq -i '(.services[] | select(.name == "${SVC}")).image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/dev/values.yaml
             git commit -am "ci: deploy ${SVC} to dev @ ${GIT_COMMIT}"
-            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:dev
           """
         }
       } }
