@@ -96,11 +96,11 @@ pipeline {
       steps { container('tools') {
         withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
           sh """
-            git fetch origin main || true
-            git checkout -B main origin/main 2>/dev/null || git checkout -B main
+            git fetch origin production || true
+            git checkout -B production origin/production 2>/dev/null || git checkout -B production
             yq -i '.image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/production/values.yaml
             git commit -am "ci: promote ${SVC} to production @ ${GIT_COMMIT}"
-            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:production
           """
         }
       } }

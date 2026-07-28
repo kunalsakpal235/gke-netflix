@@ -5,7 +5,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/kunalsakpal235/gke-netflix.git
-    targetRevision: main
+    targetRevision: production
     path: streaming-platform/charts/streaming
     helm:
       valueFiles: ["../../gitops/environments/production/values.yaml"]

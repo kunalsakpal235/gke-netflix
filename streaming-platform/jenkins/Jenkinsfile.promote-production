@@ -26,11 +26,11 @@ pipeline {
           sh """
             git config --global --add safe.directory "\$WORKSPACE"
             git config user.email ci@lab && git config user.name jenkins
-            git fetch origin main || true
-            git checkout -B main origin/main 2>/dev/null || git checkout -B main
+            git fetch origin production || true
+            git checkout -B production origin/production 2>/dev/null || git checkout -B production
             yq -i '.image.tag = "${env.PROMOTED_TAG}"' streaming-platform/gitops/environments/production/values.yaml
             git commit -am "ci: promote ${env.PROMOTED_TAG} staging -> production"
-            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:production
           """
         }
       } }
