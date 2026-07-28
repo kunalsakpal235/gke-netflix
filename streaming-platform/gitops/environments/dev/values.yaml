@@ -1,2 +1,6 @@
+service:
+  name: catalog-service
+  containerPort: 8091
 image:
+  repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service
   tag: REPLACED_BY_CI
