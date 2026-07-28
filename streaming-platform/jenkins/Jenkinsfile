@@ -56,7 +56,7 @@ pipeline {
             chmod +x /usr/local/bin/argocd
             argocd login argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
             argocd app sync streaming-dev
-            argocd app wait streaming-dev --health --timeout 300
+            argocd app wait streaming-dev --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
           '''
         }
       } }
