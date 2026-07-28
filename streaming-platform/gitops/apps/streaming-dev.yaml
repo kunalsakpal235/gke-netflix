@@ -4,9 +4,9 @@ metadata: { name: streaming-dev, namespace: argocd }
 spec:
   project: default
   source:
-    repoURL: https://github.com/YOUR_GH/streaming-platform.git
+    repoURL: https://github.com/kunalsakpal235/gke-netflix.git
     targetRevision: dev
-    path: charts/streaming
+    path: streaming-platform/charts/streaming
     helm:
       valueFiles: ["../../gitops/environments/dev/values.yaml"]
   destination: { server: https://kubernetes.default.svc, namespace: streaming }
