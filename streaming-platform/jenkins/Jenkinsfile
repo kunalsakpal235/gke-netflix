@@ -1,8 +1,12 @@
 pipeline {
   agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+  parameters {
+    choice(name: 'SVC', choices: ['catalog-service', 'frontend', 'api-gateway', 'user-service', 'playback-service'],
+           description: 'Which service to build, scan, and deploy to dev')
+  }
   environment {
     REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
-    SVC = 'catalog-service'
+    SVC = "${params.SVC}"
     IMAGE = "${REGISTRY}/${SVC}:${GIT_COMMIT}"
   }
   stages {
@@ -27,20 +31,20 @@ pipeline {
     }
     stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' } } }
     stage('Push (kaniko)') { steps { container('kaniko-push') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
-    stage('Approval') { steps { input message: 'Deploy to dev?', ok: 'Ship it' } }
+    stage('Approval') { steps { input message: "Deploy ${env.SVC} to dev?", ok: 'Ship it' } }
     stage('GitOps commit') {
       steps { container('tools') {
         withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
-          sh '''
+          sh """
             apk add --no-cache git curl
             curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
             chmod +x /usr/local/bin/yq
-            yq -i ".image.tag = \\"${GIT_COMMIT}\\"" streaming-platform/gitops/environments/dev/values.yaml
-            git config --global --add safe.directory "$WORKSPACE"
+            git config --global --add safe.directory "\$WORKSPACE"
             git config user.email ci@lab && git config user.name jenkins
-            git commit -am "ci: deploy ${SVC} ${GIT_COMMIT}"
-            git push https://$U:$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
-          '''
+            yq -i '(.services[] | select(.name == "${SVC}")).image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/dev/values.yaml
+            git commit -am "ci: deploy ${SVC} to dev @ ${GIT_COMMIT}"
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+          """
         }
       } }
     }

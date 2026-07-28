@@ -1,10 +1,5 @@
-service:
-  name: api-gateway
-  containerPort: 8080
+# Global settings, shared across all 5 services unless a service needs its own override later.
 replicaCount: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill
-image:
-  repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway
-  tag: latest
 serviceAccountName: streaming-workloads
 resources:
   requests: { cpu: 100m, memory: 128Mi }
@@ -15,6 +10,24 @@ probes:
 autoscaling: { enabled: true, minReplicas: 1, maxReplicas: 3, targetCPU: 70 }   # maxReplicas kept low for an ~8 vCPU quota; raise it if your project has more
 pdb: { minAvailable: 1 }
 spot: true
-ingress:
-  enabled: false
-  path: /api
+
+# Per-service settings - this is what makes it a multi-service chart.
+# Environment values files (gitops/environments/*/values.yaml) override just the
+# image.tag per service; name/repository/containerPort should stay identical across
+# dev/staging/production since they describe the same services, not the environment.
+services:
+  - name: frontend
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: latest }
+    containerPort: 3000
+  - name: api-gateway
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: latest }
+    containerPort: 8080
+  - name: catalog-service
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: latest }
+    containerPort: 8091
+  - name: user-service
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: latest }
+    containerPort: 8092
+  - name: playback-service
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: latest }
+    containerPort: 8093

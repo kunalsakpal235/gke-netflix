@@ -1,8 +1,12 @@
 // Approach B, part 2: standalone job, triggered manually whenever you're ready to promote.
-// Rebuilds nothing - reads whatever image tag is currently live in staging, and promotes
-// that exact, already-tested artifact to production after a manual approval.
+// Rebuilds nothing - reads whatever image tag is currently live in staging for the chosen
+// service, and promotes that exact, already-tested artifact to production after approval.
 pipeline {
   agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+  parameters {
+    choice(name: 'SVC', choices: ['catalog-service', 'frontend', 'api-gateway', 'user-service', 'playback-service'],
+           description: 'Which service to promote from staging to production')
+  }
   stages {
     stage('Checkout staging (source of promotion)') {
       steps {
@@ -14,12 +18,12 @@ pipeline {
         script {
           sh 'apk add --no-cache curl'
           sh 'curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq'
-          env.PROMOTED_TAG = sh(script: "yq '.image.tag' streaming-platform/gitops/environments/staging/values.yaml", returnStdout: true).trim()
+          env.PROMOTED_TAG = sh(script: "yq '(.services[] | select(.name == \"${params.SVC}\")).image.tag' streaming-platform/gitops/environments/staging/values.yaml", returnStdout: true).trim()
         }
-        echo "Promoting tag: ${env.PROMOTED_TAG}"
+        echo "Promoting ${params.SVC} tag: ${env.PROMOTED_TAG}"
       } }
     }
-    stage('Approval') { steps { input message: "Promote ${env.PROMOTED_TAG} from staging to PRODUCTION?", ok: 'Promote' } }
+    stage('Approval') { steps { input message: "Promote ${params.SVC} (${env.PROMOTED_TAG}) from staging to PRODUCTION?", ok: 'Promote' } }
     stage('Update production + push') {
       steps { container('tools') {
         withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
@@ -28,8 +32,8 @@ pipeline {
             git config user.email ci@lab && git config user.name jenkins
             git fetch origin production || true
             git checkout -B production origin/production 2>/dev/null || git checkout -B production
-            yq -i '.image.tag = "${env.PROMOTED_TAG}"' streaming-platform/gitops/environments/production/values.yaml
-            git commit -am "ci: promote ${env.PROMOTED_TAG} staging -> production"
+            yq -i '(.services[] | select(.name == "${params.SVC}")).image.tag = "${env.PROMOTED_TAG}"' streaming-platform/gitops/environments/production/values.yaml
+            git commit -am "ci: promote ${params.SVC} ${env.PROMOTED_TAG} staging -> production"
             git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:production
           """
         }
