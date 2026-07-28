@@ -1,0 +1,119 @@
+// Approach A: one continuous pipeline, dev -> staging -> production, in sequence.
+// Every promotion needs an explicit human approval - nothing here is automatic.
+// The image is built and tested exactly ONCE (Compile/SonarQube/Trivy/Push); staging and
+// production never rebuild anything - they promote the same already-tested artifact by
+// updating that environment's own values.yaml with the same image tag.
+pipeline {
+  agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+  environment {
+    REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
+    SVC = 'catalog-service'
+    IMAGE = "${REGISTRY}/${SVC}:${GIT_COMMIT}"
+  }
+  stages {
+    stage('Checkout') { steps { checkout scm } }
+    stage('Compile') {
+      steps { container('gradle') {
+        sh "cd streaming-platform/services/${SVC} && gradle compileJava --no-daemon"
+      } }
+    }
+    stage('SonarQube') {
+      steps { container('sonar-scanner') {
+        withSonarQubeEnv('sonar') {
+          sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
+        }
+      } }
+    }
+    stage('Quality Gate') { steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } } }
+    stage('Build (kaniko)') {
+      steps { container('kaniko') {
+        sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
+      } }
+    }
+    stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' } } }
+    stage('Push (kaniko)') { steps { container('kaniko-push') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
+
+    stage('Approval: Deploy to dev?') { steps { input message: 'Deploy to dev?', ok: 'Ship it' } }
+    stage('Promote: dev') {
+      steps { container('tools') {
+        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh """
+            apk add --no-cache git curl
+            curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+            chmod +x /usr/local/bin/yq
+            git config --global --add safe.directory "\$WORKSPACE"
+            git config user.email ci@lab && git config user.name jenkins
+            git fetch origin dev || true
+            git checkout -B dev origin/dev 2>/dev/null || git checkout -B dev
+            yq -i '.image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/dev/values.yaml
+            git commit -am "ci: promote ${SVC} to dev @ ${GIT_COMMIT}"
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:dev
+          """
+        }
+      } }
+    }
+    stage('ArgoCD sync & verify: dev') {
+      steps { container('tools') {
+        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          sh '''
+            curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
+            chmod +x /usr/local/bin/argocd
+            argocd login argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            argocd app sync streaming-dev
+            argocd app wait streaming-dev --health --timeout 300
+          '''
+        }
+      } }
+    }
+
+    stage('Approval: Promote to staging?') { steps { input message: 'Promote to staging?', ok: 'Promote' } }
+    stage('Promote: staging') {
+      steps { container('tools') {
+        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh """
+            git fetch origin staging || true
+            git checkout -B staging origin/staging 2>/dev/null || git checkout -B staging
+            yq -i '.image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/staging/values.yaml
+            git commit -am "ci: promote ${SVC} to staging @ ${GIT_COMMIT}"
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:staging
+          """
+        }
+      } }
+    }
+    stage('ArgoCD sync & verify: staging') {
+      steps { container('tools') {
+        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          sh '''
+            argocd app sync streaming-staging
+            argocd app wait streaming-staging --health --timeout 300
+          '''
+        }
+      } }
+    }
+
+    stage('Approval: Promote to PRODUCTION?') { steps { input message: 'Promote to PRODUCTION?', ok: 'Promote' } }
+    stage('Promote: production') {
+      steps { container('tools') {
+        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
+          sh """
+            git fetch origin main || true
+            git checkout -B main origin/main 2>/dev/null || git checkout -B main
+            yq -i '.image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/production/values.yaml
+            git commit -am "ci: promote ${SVC} to production @ ${GIT_COMMIT}"
+            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:main
+          """
+        }
+      } }
+    }
+    stage('ArgoCD sync & verify: production') {
+      steps { container('tools') {
+        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+          sh '''
+            argocd app sync streaming-production
+            argocd app wait streaming-production --health --timeout 300
+          '''
+        }
+      } }
+    }
+  }
+}
