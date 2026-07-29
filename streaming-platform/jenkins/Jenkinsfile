@@ -12,14 +12,28 @@ pipeline {
   stages {
     stage('Checkout') { steps { checkout scm } }
     stage('Compile') {
-      steps { container('gradle') {
-        sh "cd streaming-platform/services/${SVC} && gradle compileJava --no-daemon"
-      } }
+      steps {
+        script {
+          if (SVC in ['catalog-service', 'user-service']) {
+            container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle compileJava --no-daemon" }
+          } else if (SVC in ['frontend', 'api-gateway']) {
+            container('node') { sh "cd streaming-platform/services/${SVC} && npm ci" }
+          } else if (SVC == 'playback-service') {
+            container('golang') { sh "cd streaming-platform/services/${SVC} && go build ./..." }
+          }
+        }
+      }
     }
     stage('SonarQube') {
       steps { container('sonar-scanner') {
         withSonarQubeEnv('sonar') {
-          sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
+          script {
+            if (SVC in ['catalog-service', 'user-service']) {
+              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
+            } else {
+              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
+            }
+          }
         }
       } }
     }

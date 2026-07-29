@@ -32,7 +32,21 @@ spec:
         requests: { ephemeral-storage: 1Gi }
         limits: { ephemeral-storage: 1Gi }
     - name: gradle
-      image: gradle:8.9-jdk21-alpine   # same image catalog-service's own Dockerfile build stage uses
+      image: gradle:8.9-jdk21-alpine   # catalog-service, user-service (Java)
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+        limits: { ephemeral-storage: 256Mi }
+    - name: node
+      image: node:20-alpine            # frontend, api-gateway (Node.js) - matches their own Dockerfiles
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+        limits: { ephemeral-storage: 512Mi }
+    - name: golang
+      image: golang:1.22-alpine        # playback-service (Go) - matches its own Dockerfile
       command: ["cat"]
       tty: true
       resources:
@@ -43,5 +57,9 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 5Gi }
-        limits: { ephemeral-storage: 5Gi }
+        # Trimmed from the previously-proven 5Gi to make room for the two new containers
+        # above. 5Gi was CONFIRMED sufficient; 2Gi was CONFIRMED not enough; this value is
+        # an untested calculated risk in between. If a future build hits the same
+        # "exceeded ephemeral storage limit" eviction, bump this back toward 5Gi first.
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4250Mi }
+        limits: { ephemeral-storage: 4250Mi }
