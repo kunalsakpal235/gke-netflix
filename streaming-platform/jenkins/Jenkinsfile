@@ -15,7 +15,7 @@ pipeline {
       steps {
         script {
           if (SVC in ['catalog-service', 'user-service']) {
-            container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle compileJava --no-daemon" }
+            container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle test jacocoTestReport --no-daemon" }
           } else if (SVC in ['frontend', 'api-gateway']) {
             container('node') { sh "cd streaming-platform/services/${SVC} && npm ci" }
           } else if (SVC == 'playback-service') {
@@ -26,7 +26,7 @@ pipeline {
     }
     stage('SonarQube') {
       steps { container('sonar-scanner') {
-        withSonarQubeEnv('sonar') {
+        withSonarQubeEnv("sonar-${SVC}") {
           script {
             if (SVC in ['catalog-service', 'user-service']) {
               sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
