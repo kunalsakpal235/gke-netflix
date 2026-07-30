@@ -26,7 +26,7 @@ pipeline {
     }
     stage('SonarQube') {
       steps { container('sonar-scanner') {
-        withSonarQubeEnv("sonar-${SVC}") {
+        withSonarQubeEnv("sonar") {
           script {
             if (SVC in ['catalog-service', 'user-service']) {
               sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main"
