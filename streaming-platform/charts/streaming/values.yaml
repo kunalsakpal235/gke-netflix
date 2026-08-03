@@ -12,22 +12,26 @@ pdb: { minAvailable: 1 }
 spot: true
 
 # Per-service settings - this is what makes it a multi-service chart.
-# Environment values files (gitops/environments/*/values.yaml) override just the
-# image.tag per service; name/repository/containerPort should stay identical across
-# dev/staging/production since they describe the same services, not the environment.
+# runAsUser MUST be a numeric UID (not a name) - restricted PSS on Autopilot refuses
+# name-based UIDs since it can't verify at admission time whether they resolve to root.
 services:
   - name: frontend
     image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: latest }
     containerPort: 3000
+    runAsUser: 1000        # node:20-alpine's built-in 'node' user
   - name: api-gateway
     image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: latest }
     containerPort: 8080
+    runAsUser: 1000        # node:20-alpine's built-in 'node' user
   - name: catalog-service
     image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: latest }
     containerPort: 8091
+    runAsUser: 1000        # Dockerfile: adduser -u 1000 -S app
   - name: user-service
     image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: latest }
     containerPort: 8092
+    runAsUser: 1000        # same JRE-Alpine adduser pattern as catalog-service
   - name: playback-service
     image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: latest }
     containerPort: 8093
+    runAsUser: 65532       # distroless/static-debian12's fixed 'nonroot' UID - different on purpose

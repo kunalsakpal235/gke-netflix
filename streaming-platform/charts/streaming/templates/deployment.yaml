@@ -17,12 +17,12 @@ spec:
           image: "{{ .image.repository }}:{{ .image.tag }}"
           ports: [{ containerPort: {{ .containerPort }} }]
           resources: {{ toYaml $.Values.resources | nindent 12 }}
-          startupProbe:  { httpGet: { path: {{ $.Values.probes.readiness }}, port: {{ .containerPort }} }, periodSeconds: 5, failureThreshold: 30 }
+          startupProbe:   { httpGet: { path: {{ $.Values.probes.readiness }}, port: {{ .containerPort }} }, periodSeconds: 5, failureThreshold: 30 }
           livenessProbe:  { httpGet: { path: {{ $.Values.probes.liveness }},  port: {{ .containerPort }} }, initialDelaySeconds: 10 }
           readinessProbe: { httpGet: { path: {{ $.Values.probes.readiness }}, port: {{ .containerPort }} }, initialDelaySeconds: 5 }
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1000                # ADD THIS LINE - satisfies restricted PSS on Autopilot
+            runAsUser: {{ .runAsUser }}
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
       {{- if $.Values.spot }}
