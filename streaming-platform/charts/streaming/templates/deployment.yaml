@@ -22,7 +22,7 @@ spec:
           readinessProbe: { httpGet: { path: {{ $.Values.probes.readiness }}, port: {{ .containerPort }} }, initialDelaySeconds: 5 }
           securityContext:
             runAsNonRoot: true
-            runAsUser: {{ .runAsUser }}
+            runAsUser: {{ .runAsUser | int }}
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
       {{- if $.Values.spot }}
