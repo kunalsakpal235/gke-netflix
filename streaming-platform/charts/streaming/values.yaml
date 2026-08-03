@@ -17,17 +17,17 @@ spot: true
 # dev/staging/production since they describe the same services, not the environment.
 services:
   - name: frontend
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: REPLACED_BY_CI }
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: latest }
     containerPort: 3000
   - name: api-gateway
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: REPLACED_BY_CI }
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: latest }
     containerPort: 8080
   - name: catalog-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: REPLACED_BY_CI }
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: latest }
     containerPort: 8091
   - name: user-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: REPLACED_BY_CI }
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: latest }
     containerPort: 8092
   - name: playback-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: REPLACED_BY_CI }
+    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: latest }
     containerPort: 8093
