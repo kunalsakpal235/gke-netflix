@@ -21,6 +21,7 @@ spec:
           readinessProbe: { httpGet: { path: {{ $.Values.probes.readiness }}, port: {{ .containerPort }} }, initialDelaySeconds: 5 }
           securityContext:
             runAsNonRoot: true
+            runAsUser: 1000                # ADD THIS LINE - satisfies restricted PSS on Autopilot
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
       {{- if $.Values.spot }}
