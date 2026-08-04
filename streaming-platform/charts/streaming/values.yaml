@@ -9,7 +9,7 @@ probes:
   readiness: /readyz
 autoscaling: { enabled: true, minReplicas: 1, maxReplicas: 3, targetCPU: 70 }   # maxReplicas kept low for an ~8 vCPU quota; raise it if your project has more
 pdb: { minAvailable: 1 }
-spot: true
+spot: false
 
 # Per-service settings - this is what makes it a multi-service chart.
 # runAsUser MUST be a numeric UID (not a name) - restricted PSS on Autopilot refuses
