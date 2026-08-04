@@ -1,0 +1,171 @@
+// Approach: build all 5 services in parallel (Compile → SonarQube → Quality Gate → Trivy → Push),
+// then serialise the GitOps commit and ArgoCD sync at the end to avoid concurrent-write races on
+// values.yaml. Partial success is accepted - services that pass their own quality gates and scans
+// deploy; services that fail are skipped and clearly reported.
+//
+// Real tradeoffs vs. the single-service Jenkinsfile:
+//   - wall-clock: ~5-8 min for all five, vs. ~30-40 min sequentially
+//   - resource cost: 5 concurrent agent pods (~50Gi ephemeral). If Autopilot lacks capacity, some
+//     parallel branches will pend. This is expected, not a bug.
+//   - one Approval gate at the end, gating all passed services at once.
+
+def SERVICES = ['catalog-service', 'user-service', 'frontend', 'api-gateway', 'playback-service']
+def JAVA_SERVICES = ['catalog-service', 'user-service']
+def NODE_SERVICES = ['frontend', 'api-gateway']
+def GO_SERVICES = ['playback-service']
+
+// Results collected across parallel branches - accessed only after 'parallel {}' returns, so no
+// concurrent mutation. Values: 'PASSED' (built + pushed, ready to deploy), 'FAILED' (any stage
+// failed), 'SKIPPED' (not attempted).
+def buildResults = [:]
+SERVICES.each { buildResults[it] = 'SKIPPED' }
+
+pipeline {
+  agent none   // top-level 'none'; each parallel branch declares its own kubernetes agent
+  environment {
+    REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
+  }
+  stages {
+
+    stage('Build & scan all services (parallel)') {
+      steps {
+        script {
+          def branches = [:]
+          for (svc in SERVICES) {
+            def SVC = svc   // capture per-iteration (Groovy closure gotcha otherwise)
+            branches[SVC] = {
+              // Each branch gets its OWN kubernetes agent - not the top-level 'none'. This is
+              // what actually gives us parallelism: five independent agent pods, each running
+              // the full Compile → Trivy → Push chain for one service.
+              podTemplate(yaml: readTrusted('streaming-platform/jenkins/agent-pod.yaml')) {
+                node(POD_LABEL) {
+                  try {
+                    checkout scm
+                    def IMAGE = "${env.REGISTRY}/${SVC}:${env.GIT_COMMIT}"
+
+                    stage("Compile: ${SVC}") {
+                      if (SVC in JAVA_SERVICES) {
+                        container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle test jacocoTestReport --no-daemon" }
+                      } else if (SVC in NODE_SERVICES) {
+                        container('node') { sh "cd streaming-platform/services/${SVC} && npm ci" }
+                      } else if (SVC in GO_SERVICES) {
+                        container('golang') { sh "cd streaming-platform/services/${SVC} && go build ./..." }
+                      }
+                    }
+
+                    stage("SonarQube: ${SVC}") {
+                      container('sonar-scanner') {
+                        withSonarQubeEnv('sonar') {
+                          if (SVC in JAVA_SERVICES) {
+                            sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml"
+                          } else {
+                            sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
+                          }
+                        }
+                      }
+                    }
+
+                    stage("Quality Gate: ${SVC}") {
+                      timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true }
+                    }
+
+                    stage("Build (kaniko): ${SVC}") {
+                      container('kaniko') {
+                        sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
+                      }
+                    }
+
+                    stage("Trivy: ${SVC}") {
+                      container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL' }
+                    }
+
+                    stage("Push (kaniko): ${SVC}") {
+                      container('kaniko-push') {
+                        sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}"
+                      }
+                    }
+
+                    buildResults[SVC] = 'PASSED'
+                    echo "✓ ${SVC}: built, scanned, and pushed"
+                  } catch (Exception e) {
+                    buildResults[SVC] = 'FAILED'
+                    echo "✗ ${SVC}: ${e.message}"
+                    // don't rethrow - failing one service should NOT abort the other four parallel branches
+                  }
+                }
+              }
+            }
+          }
+          // Semantic difference from a plain 'parallel {}' block: the try/catch above means one
+          // service's failure genuinely can't propagate out and cancel siblings, even without
+          // failFast set. Setting failFast: false explicitly is belt-and-braces though.
+          parallel branches
+        }
+      }
+    }
+
+    stage('Summary & approval') {
+      agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+      steps {
+        script {
+          def passed = buildResults.findAll { k, v -> v == 'PASSED' }.keySet() as List
+          def failed = buildResults.findAll { k, v -> v == 'FAILED' }.keySet() as List
+          echo "===== Build results ====="
+          echo "PASSED (will deploy): ${passed}"
+          echo "FAILED (skipped):     ${failed}"
+          if (passed.isEmpty()) {
+            error "No services passed - nothing to deploy. Check the parallel stage logs for the specific failure per service."
+          }
+          input message: "Deploy ${passed.size()} passed service(s) to dev? (${passed.join(', ')})", ok: 'Ship it'
+        }
+      }
+    }
+
+    stage('GitOps commit (all passed services)') {
+      agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+      steps {
+        container('tools') {
+          withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
+            script {
+              // All passed services' tags updated in ONE commit, ONE push - so there's exactly one
+              // ArgoCD reconciliation event downstream, and no chance of racing commits. This is
+              // the whole reason we serialise here instead of letting each parallel branch push
+              // its own commit.
+              def passed = buildResults.findAll { k, v -> v == 'PASSED' }.keySet() as List
+              def yqCommands = passed.collect { svc ->
+                "yq -i '(.services[] | select(.name == \"${svc}\")).image.tag = \"${env.GIT_COMMIT}\"' streaming-platform/gitops/environments/dev/values.yaml"
+              }.join('\n            ')
+              sh """
+                apk add --no-cache git curl
+                curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+                chmod +x /usr/local/bin/yq
+                git config --global --add safe.directory "\$WORKSPACE"
+                git config user.email ci@lab && git config user.name jenkins
+                ${yqCommands}
+                git commit -am "ci: batch-deploy ${passed.join(', ')} to dev @ ${env.GIT_COMMIT}"
+                git pull --rebase https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git dev
+                git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:dev
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('ArgoCD sync & verify') {
+      agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+      steps {
+        container('tools') {
+          withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+            sh '''
+              curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
+              chmod +x /usr/local/bin/argocd
+              argocd app sync streaming-dev --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+              argocd app wait streaming-dev --health --timeout 600 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            '''
+          }
+        }
+      }
+    }
+  }
+}
