@@ -28,8 +28,11 @@ pipeline {
       steps { container('sonar-scanner') {
         withSonarQubeEnv("sonar") {
           script {
+//            if (SVC in ['catalog-service', 'user-service']) {
+//              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml "
             if (SVC in ['catalog-service', 'user-service']) {
-              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC} -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml "
+  sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml"
+}
             } else {
               sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
             }
