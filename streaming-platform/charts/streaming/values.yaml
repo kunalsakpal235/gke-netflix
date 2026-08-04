@@ -2,7 +2,7 @@
 replicaCount: 1   # quota-safe baseline for a free-tier project; bump to 2 only for the Phase 11 HA drill
 serviceAccountName: streaming-workloads
 resources:
-  requests: { cpu: 100m, memory: 128Mi }
+  requests: { cpu: 50m, memory: 64Mi }
   limits:   { cpu: 300m, memory: 256Mi }
 probes:
   liveness: /healthz
