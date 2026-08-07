@@ -1,5 +1,6 @@
 # Uses the gradle image so no gradle wrapper jar is needed in the repo.
 FROM gradle:8.14-jdk21-alpine AS build
+RUN apk upgrade --no-cache
 WORKDIR /src
 COPY . .
 RUN gradle clean bootJar --no-daemon
