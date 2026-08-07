@@ -75,8 +75,8 @@ pipeline {
           sh '''
             curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
             chmod +x /usr/local/bin/argocd
-            argocd app sync streaming-dev --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
-            argocd app wait streaming-dev --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            argocd app sync streaming-dev --resource apps:Deployment:$SVC --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            argocd app wait streaming-dev --resource apps:Deployment:$SVC --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
           '''
         }
       } }
