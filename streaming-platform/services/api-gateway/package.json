@@ -3,5 +3,5 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": { "start": "node server.js", "test": "node --test" },
-  "dependencies": { "fastify": "^4.28.0" }
+  "dependencies": { "fastify": "^5.7.2" }
 }
