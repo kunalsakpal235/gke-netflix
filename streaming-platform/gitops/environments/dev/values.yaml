@@ -1,21 +1,21 @@
 services:
   - name: frontend
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: REPLACED_BY_CI }
+    image: {repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/frontend, tag: REPLACED_BY_CI}
     containerPort: 3000
     runAsUser: 1000
   - name: api-gateway
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: REPLACED_BY_CI }
+    image: {repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/api-gateway, tag: 4abc281aa5dfc73ae3894a8e6bc35a8a0ba69e3a}
     containerPort: 8080
     runAsUser: 1000
   - name: catalog-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: REPLACED_BY_CI }
+    image: {repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/catalog-service, tag: REPLACED_BY_CI}
     containerPort: 8091
     runAsUser: 1000
   - name: user-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: REPLACED_BY_CI }
+    image: {repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/user-service, tag: REPLACED_BY_CI}
     containerPort: 8092
     runAsUser: 1000
   - name: playback-service
-    image: { repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: REPLACED_BY_CI }
+    image: {repository: asia-south1-docker.pkg.dev/devops-1-502311/streaming-images/playback-service, tag: REPLACED_BY_CI}
     containerPort: 8093
     runAsUser: 65532
