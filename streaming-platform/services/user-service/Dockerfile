@@ -1,11 +1,11 @@
 # Uses the gradle image so no gradle wrapper jar is needed in the repo.
 FROM gradle:8.14-jdk21-alpine AS build
-RUN apk upgrade --no-cache libexpat p11-kit p11-kit-trust
 WORKDIR /src
 COPY . .
 RUN gradle clean bootJar --no-daemon
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
+RUN apk upgrade --no-cache libexpat p11-kit p11-kit-trust
 RUN addgroup -g 1000 -S app && adduser -u 1000 -S app -G app
 COPY --from=build --chown=app:app /src/build/libs/*.jar app.jar
 USER app
