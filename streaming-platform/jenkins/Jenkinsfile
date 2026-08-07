@@ -29,7 +29,13 @@ pipeline {
         withSonarQubeEnv('sonar') {
           script {
             if (SVC in ['catalog-service', 'user-service']) {
-              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml"
+              // Only pass sonar.tests / jacoco flags if the test directory genuinely exists.
+              // Services without tests yet would otherwise fail sonar-scanner's config validation
+              // with "Invalid value of sonar.tests / folder does not exist". Note: with no tests,
+              // new_coverage will be 0% and the Quality Gate will still block downstream — this
+              // fix only clears the parse error, not the coverage requirement.
+              def testFlag = fileExists("streaming-platform/services/${SVC}/src/test") ? "-Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml" : ""
+              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main ${testFlag}"
             } else {
               sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
             }
@@ -70,7 +76,7 @@ pipeline {
             curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
             chmod +x /usr/local/bin/argocd
             argocd app sync streaming-dev --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
-            argocd app wait streaming-dev --health --timeout 100 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+            argocd app wait streaming-dev --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
           '''
         }
       } }
