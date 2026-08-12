@@ -8,29 +8,37 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1250Mi }
-        limits: { ephemeral-storage: 1250Mi }
+        # Bumped 1250Mi -> 1536Mi: frontend's node_modules tree (React/Next.js + build
+        # tooling) is genuinely larger than api-gateway's, and evicted at 1250Mi mid-build.
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug   # separate, fresh container - kaniko can't safely run twice in one
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1250Mi }
-        limits: { ephemeral-storage: 1250Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: tools
       image: alpine:3.20               # holds git/yq/argocd-cli, all installed inline as needed
       command: ["cat"]
       tty: true
       resources:
-        requests: { ephemeral-storage: 512Mi }
-        limits: { ephemeral-storage: 512Mi }
+        # Trimmed 512Mi -> 256Mi to help fund the kaniko bump above. This container only
+        # ever runs apk add (git/curl) plus two small CLI binary downloads - genuinely
+        # low-risk trim, not previously tested at this exact value.
+        requests: { ephemeral-storage: 256Mi }
+        limits: { ephemeral-storage: 256Mi }
     - name: sonar-scanner
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
       tty: true
       resources:
-        requests: { ephemeral-storage: 1Gi }
-        limits: { ephemeral-storage: 1Gi }
+        # Trimmed 1Gi -> 768Mi, same reasoning as tools above. sonar-scanner is a CLI tool,
+        # not the SonarQube server itself - has run successfully many times tonight at 1Gi
+        # with no signs of needing that much. Untested at exactly 768Mi though.
+        requests: { ephemeral-storage: 768Mi }
+        limits: { ephemeral-storage: 768Mi }
     - name: gradle
       image: gradle:8.9-jdk21-alpine   # catalog-service, user-service (Java)
       command: ["cat"]
@@ -57,9 +65,8 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        # Trimmed from the previously-proven 5Gi to make room for the two new containers
-        # above. 5Gi was CONFIRMED sufficient; 2Gi was CONFIRMED not enough; this value is
-        # an untested calculated risk in between. If a future build hits the same
-        # "exceeded ephemeral storage limit" eviction, bump this back toward 5Gi first.
+        # 5Gi proven sufficient; 2Gi proven insufficient; 4000Mi is the current working
+        # value from the last fix. Left untouched this round - already reduced twice,
+        # not touching a third time until there's real evidence it needs to change.
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4000Mi }
         limits: { ephemeral-storage: 4000Mi }
