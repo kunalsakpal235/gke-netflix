@@ -11,6 +11,7 @@ RUN npm run build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000
+RUN apk upgrade --no-cache libssl3 libcrypto3
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
