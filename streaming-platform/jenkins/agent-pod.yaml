@@ -39,10 +39,18 @@ spec:
         # Trimmed 1Gi -> 768Mi, same reasoning as tools above. sonar-scanner is a CLI tool,
         # not the SonarQube server itself - has run successfully many times tonight at 1Gi
         # with no signs of needing that much. Untested at exactly 768Mi though.
-        requests: { cpu: 250m, memory: 768Mi, ephemeral-storage: 512Mi }
-        limits: { cpu: 250m, memory: 768Mi, ephemeral-storage: 512Mi }
-          #requests: { ephemeral-storage: 768Mi }
-          #limits: { ephemeral-storage: 768Mi }
+        requests: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
+        limits: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
+    - name: jnlp
+      image: jenkins/inbound-agent:3383.vc8881d4b_0e76-1-jdk25
+      resources:
+        # ephemeral-storage now set explicitly (256Mi). Without this, Autopilot silently
+        # injected its own default (1Gi) - the same hidden-default pattern found earlier
+        # for tools/sonar-scanner's cpu/memory. jnlp only runs the remoting/agent jar,
+        # genuinely doesn't need anywhere near 1Gi. This freed space funds the
+        # sonar-scanner bump above.
+        requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+        limits: { ephemeral-storage: 256Mi }
     - name: gradle
       image: gradle:8.9-jdk21-alpine   # catalog-service, user-service (Java)
       command: ["cat"]
