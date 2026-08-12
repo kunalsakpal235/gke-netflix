@@ -49,7 +49,7 @@ pipeline {
         sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
       } }
     }
-    stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed' } } }
+    stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --ignorefile streaming-platform/services/${SVC}/.trivyignore' } } }
     stage('Push (kaniko)') { steps { container('kaniko-push') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
     stage('Approval') { steps { input message: "Deploy ${env.SVC} to dev?", ok: 'Ship it' } }
     stage('GitOps commit') {
