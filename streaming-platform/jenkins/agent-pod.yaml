@@ -61,5 +61,5 @@ spec:
         # above. 5Gi was CONFIRMED sufficient; 2Gi was CONFIRMED not enough; this value is
         # an untested calculated risk in between. If a future build hits the same
         # "exceeded ephemeral storage limit" eviction, bump this back toward 5Gi first.
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4250Mi }
-        limits: { ephemeral-storage: 4250Mi }
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4000Mi }
+        limits: { ephemeral-storage: 4000Mi }
