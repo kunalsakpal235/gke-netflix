@@ -39,8 +39,10 @@ spec:
         # Trimmed 1Gi -> 768Mi, same reasoning as tools above. sonar-scanner is a CLI tool,
         # not the SonarQube server itself - has run successfully many times tonight at 1Gi
         # with no signs of needing that much. Untested at exactly 768Mi though.
-        requests: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
-        limits: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
+        #requests: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
+          #limits: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
+        requests: { cpu: 250m, memory: 1536Mi, ephemeral-storage: 1280Mi }
+        limits: { cpu: 250m, memory: 1536Mi, ephemeral-storage: 1280Mi }
     - name: jnlp
       image: jenkins/inbound-agent:3383.vc8881d4b_0e76-1-jdk25
       resources:
