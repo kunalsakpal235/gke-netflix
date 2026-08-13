@@ -12,6 +12,9 @@ spec:
         # tooling) is genuinely larger than api-gateway's, and evicted at 1250Mi mid-build.
         requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
         limits: { ephemeral-storage: 1536Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug   # separate, fresh container - kaniko can't safely run twice in one
       command: ["/busybox/cat"]
@@ -19,6 +22,9 @@ spec:
       resources:
         requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
         limits: { ephemeral-storage: 1536Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: tools
       image: alpine:3.20               # holds git/yq/argocd-cli, all installed inline as needed
       command: ["cat"]
@@ -31,6 +37,9 @@ spec:
         limits: { cpu: 100m, memory: 256Mi, ephemeral-storage: 512Mi }
           #requests: { ephemeral-storage: 256Mi }
           #limits: { ephemeral-storage: 256Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: sonar-scanner
       image: sonarsource/sonar-scanner-cli:latest
       command: ["cat"]
@@ -43,6 +52,9 @@ spec:
           #limits: { cpu: 250m, memory: 768Mi, ephemeral-storage: 1280Mi }
         requests: { cpu: 250m, memory: 1536Mi, ephemeral-storage: 1280Mi }
         limits: { cpu: 250m, memory: 1536Mi, ephemeral-storage: 1280Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: jnlp
       image: jenkins/inbound-agent:3383.vc8881d4b_0e76-1-jdk25
       resources:
@@ -53,6 +65,9 @@ spec:
         # sonar-scanner bump above.
         requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
         limits: { ephemeral-storage: 256Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: gradle
       image: gradle:8.9-jdk21-alpine   # catalog-service, user-service (Java)
       command: ["cat"]
@@ -60,6 +75,9 @@ spec:
       resources:
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
         limits: { ephemeral-storage: 256Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: node
       image: node:20-alpine            # frontend, api-gateway (Node.js) - matches their own Dockerfiles
       command: ["cat"]
@@ -67,6 +85,9 @@ spec:
       resources:
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
         limits: { ephemeral-storage: 512Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: golang
       image: golang:1.26-alpine        # playback-service (Go) - matches its own Dockerfile
       command: ["cat"]
@@ -74,6 +95,9 @@ spec:
       resources:
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
         limits: { ephemeral-storage: 256Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
     - name: trivy
       image: aquasec/trivy:latest
       command: ["cat"]
@@ -84,3 +108,6 @@ spec:
         # not touching a third time until there's real evidence it needs to change.
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4000Mi }
         limits: { ephemeral-storage: 4000Mi }
+      env:
+        - name: TZ
+          value: "Asia/Kolkata"
