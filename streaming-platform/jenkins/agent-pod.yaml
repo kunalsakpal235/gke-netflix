@@ -10,8 +10,8 @@ spec:
       resources:
         # Bumped 1250Mi -> 1536Mi: frontend's node_modules tree (React/Next.js + build
         # tooling) is genuinely larger than api-gateway's, and evicted at 1250Mi mid-build.
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
-        limits: { ephemeral-storage: 1536Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1792Mi }
+        limits: { ephemeral-storage: 1792Mi }
       env:
         - name: TZ
           value: "Asia/Kolkata"
@@ -20,8 +20,8 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
-        limits: { ephemeral-storage: 1536Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1792Mi }
+        limits: { ephemeral-storage: 1792Mi }
       env:
         - name: TZ
           value: "Asia/Kolkata"
@@ -106,8 +106,8 @@ spec:
         # 5Gi proven sufficient; 2Gi proven insufficient; 4000Mi is the current working
         # value from the last fix. Left untouched this round - already reduced twice,
         # not touching a third time until there's real evidence it needs to change.
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4000Mi }
-        limits: { ephemeral-storage: 4000Mi }
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 3488Mi }
+        limits: { ephemeral-storage: 3488Mi }
       env:
         - name: TZ
           value: "Asia/Kolkata"
