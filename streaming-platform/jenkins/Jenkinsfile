@@ -1,5 +1,5 @@
 pipeline {
-  agent { kubernetes { yamlFile 'streaming-platform/jenkins/agent-pod.yaml' } }
+  agent none
   parameters {
     choice(name: 'SVC', choices: ['catalog-service', 'frontend', 'api-gateway', 'user-service', 'playback-service'],
            description: 'Which service to build, scan, and deploy to dev')
@@ -7,79 +7,113 @@ pipeline {
   environment {
     REGISTRY = 'asia-south1-docker.pkg.dev/devops-1-502311/streaming-images'
     SVC = "${params.SVC}"
-    IMAGE = "${REGISTRY}/${SVC}:${GIT_COMMIT}"
   }
   stages {
-    stage('Checkout') { steps { checkout scm } }
-    stage('Compile') {
+    stage('Build and Deploy') {
       steps {
         script {
-          if (SVC in ['catalog-service', 'user-service']) {
-            container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle test jacocoTestReport --no-daemon" }
-          } else if (SVC in ['frontend', 'api-gateway']) {
-            container('node') { sh "cd streaming-platform/services/${SVC} && npm ci" }
-          } else if (SVC == 'playback-service') {
-            container('golang') { sh "cd streaming-platform/services/${SVC} && go build ./..." }
-          }
-        }
-      }
-    }
-    stage('SonarQube') {
-      steps { container('sonar-scanner') {
-        withSonarQubeEnv('sonar') {
-          script {
-            if (SVC in ['catalog-service', 'user-service']) {
-              // Only pass sonar.tests / jacoco flags if the test directory genuinely exists.
-              // Services without tests yet would otherwise fail sonar-scanner's config validation
-              // with "Invalid value of sonar.tests / folder does not exist". Note: with no tests,
-              // new_coverage will be 0% and the Quality Gate will still block downstream — this
-              // fix only clears the parse error, not the coverage requirement.
-              def testFlag = fileExists("streaming-platform/services/${SVC}/src/test") ? "-Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml" : ""
-              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main ${testFlag}"
-            } else {
-              sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
+          // Each service type only needs the containers it actually uses. One shared
+          // 9-container pod trying to serve Java/Node/Go peak needs simultaneously within
+          // a fixed 10Gi Autopilot ceiling was the root cause of the repeated ephemeral
+          // storage evictions tonight. Three right-sized templates, selected by SVC,
+          // fixes this structurally instead of continuing to reshuffle one fixed budget.
+          def podYamlFile =
+            (SVC in ['catalog-service', 'user-service']) ? 'streaming-platform/jenkins/agent-pod-java.yaml' :
+            (SVC in ['frontend', 'api-gateway'])          ? 'streaming-platform/jenkins/agent-pod-node.yaml' :
+                                                             'streaming-platform/jenkins/agent-pod-go.yaml'
+
+          podTemplate(yaml: readTrusted(podYamlFile)) {
+            node(POD_LABEL) {
+              def IMAGE = "${env.REGISTRY}/${SVC}:${env.GIT_COMMIT}"
+
+              stage('Checkout') { checkout scm }
+
+              stage('Compile') {
+                if (SVC in ['catalog-service', 'user-service']) {
+                  container('gradle') { sh "cd streaming-platform/services/${SVC} && gradle test jacocoTestReport --no-daemon" }
+                } else if (SVC in ['frontend', 'api-gateway']) {
+                  container('node') { sh "cd streaming-platform/services/${SVC} && npm ci" }
+                } else if (SVC == 'playback-service') {
+                  container('golang') { sh "cd streaming-platform/services/${SVC} && go build ./..." }
+                }
+              }
+
+              stage('SonarQube') {
+                container('sonar-scanner') {
+                  withSonarQubeEnv('sonar') {
+                    if (SVC in ['catalog-service', 'user-service']) {
+                      def testFlag = fileExists("streaming-platform/services/${SVC}/src/test") ?
+                        "-Dsonar.tests=streaming-platform/services/${SVC}/src/test -Dsonar.coverage.jacoco.xmlReportPaths=streaming-platform/services/${SVC}/build/reports/jacoco/test/jacocoTestReport.xml" : ""
+                      sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}/src/main -Dsonar.java.binaries=streaming-platform/services/${SVC}/build/classes/java/main ${testFlag}"
+                    } else {
+                      sh "sonar-scanner -Dsonar.projectKey=${SVC} -Dsonar.sources=streaming-platform/services/${SVC}"
+                    }
+                  }
+                }
+              }
+
+              stage('Quality Gate') {
+                timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true }
+              }
+
+              stage('Build (kaniko)') {
+                container('kaniko') {
+                  sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
+                }
+              }
+
+              stage('Trivy') {
+                container('trivy') {
+                  def ignoreFlag = fileExists("streaming-platform/services/${SVC}/.trivyignore") ?
+                    "--ignorefile streaming-platform/services/${SVC}/.trivyignore" : ""
+                  sh "trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed ${ignoreFlag}"
+                }
+              }
+
+              stage('Push (kaniko)') {
+                container('kaniko-push') {
+                  sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}"
+                }
+              }
+
+              stage('Approval') {
+                input message: "Deploy ${SVC} to dev?", ok: 'Ship it'
+              }
+
+              stage('GitOps commit') {
+                container('tools') {
+                  withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
+                    sh """
+                      apk add --no-cache git curl
+                      curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+                      chmod +x /usr/local/bin/yq
+                      git config --global --add safe.directory "\$WORKSPACE"
+                      git config user.email ci@lab && git config user.name jenkins
+                      yq -i '(.services[] | select(.name == "${SVC}")).image.tag = "${env.GIT_COMMIT}"' streaming-platform/gitops/environments/dev/values.yaml
+                      git commit -am "ci: deploy ${SVC} to dev @ ${env.GIT_COMMIT}"
+                      git pull --rebase https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git dev
+                      git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:dev
+                    """
+                  }
+                }
+              }
+
+              stage('ArgoCD sync & verify') {
+                container('tools') {
+                  withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
+                    sh '''
+                      curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
+                      chmod +x /usr/local/bin/argocd
+                      argocd app sync streaming-dev --resource apps:Deployment:$SVC --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+                      argocd app wait streaming-dev --resource apps:Deployment:$SVC --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
+                    '''
+                  }
+                }
+              }
             }
           }
         }
-      } }
-    }
-    stage('Quality Gate') { steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } } }
-    stage('Build (kaniko)') {
-      steps { container('kaniko') {
-        sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --no-push --tarPath=img.tar --destination=${IMAGE}"
-      } }
-    }
-    stage('Trivy') { steps { container('trivy') { sh 'trivy image --input img.tar --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --ignorefile streaming-platform/services/${SVC}/.trivyignore' } } }
-    stage('Push (kaniko)') { steps { container('kaniko-push') { sh "/kaniko/executor --dockerfile=Dockerfile --context=streaming-platform/services/${SVC} --destination=${IMAGE}" } } }
-    stage('Approval') { steps { input message: "Deploy ${env.SVC} to dev?", ok: 'Ship it' } }
-    stage('GitOps commit') {
-      steps { container('tools') {
-        withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
-          sh """
-            apk add --no-cache git curl
-            curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
-            chmod +x /usr/local/bin/yq
-            git config --global --add safe.directory "\$WORKSPACE"
-            git config user.email ci@lab && git config user.name jenkins
-            yq -i '(.services[] | select(.name == "${SVC}")).image.tag = "${GIT_COMMIT}"' streaming-platform/gitops/environments/dev/values.yaml
-            git commit -am "ci: deploy ${SVC} to dev @ ${GIT_COMMIT}"
-            git pull --rebase https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git dev
-            git push https://\$U:\$P@github.com/kunalsakpal235/gke-netflix.git HEAD:dev
-          """
-        }
-      } }
-    }
-    stage('ArgoCD sync & verify') {
-      steps { container('tools') {
-        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_TOKEN')]) {
-          sh '''
-            curl -sL https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64 -o /usr/local/bin/argocd
-            chmod +x /usr/local/bin/argocd
-            argocd app sync streaming-dev --resource apps:Deployment:$SVC --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
-            argocd app wait streaming-dev --resource apps:Deployment:$SVC --health --timeout 300 --server argocd-server.argocd.svc.cluster.local --insecure --plaintext --auth-token "$ARGOCD_TOKEN"
-          '''
-        }
-      } }
+      }
     }
   }
 }
