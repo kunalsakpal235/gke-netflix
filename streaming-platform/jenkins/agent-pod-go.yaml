@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: ci-builder
+  containers:
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:debug
+      command: ["/busybox/cat"]
+      tty: true
+      resources:
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1024Mi }
+        limits: { ephemeral-storage: 1024Mi }
+    - name: kaniko-push
+      image: gcr.io/kaniko-project/executor:debug
+      command: ["/busybox/cat"]
+      tty: true
+      resources:
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1024Mi }
+        limits: { ephemeral-storage: 1024Mi }
+    - name: tools
+      image: alpine:3.20
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 512Mi }
+        limits: { cpu: 100m, memory: 256Mi, ephemeral-storage: 512Mi }
+    - name: sonar-scanner
+      image: sonarsource/sonar-scanner-cli:latest
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+    - name: golang
+      image: golang:1.26-alpine
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+        limits: { ephemeral-storage: 256Mi }
+    - name: trivy
+      image: aquasec/trivy:latest
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 768Mi }
+        limits: { ephemeral-storage: 768Mi }
+    - name: jnlp
+      resources:
+        requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+        limits: { ephemeral-storage: 256Mi }
+  nodeSelector: { kubernetes.io/os: linux }
+  restartPolicy: Never
+  volumes: [{ name: workspace-volume, emptyDir: {} }]
