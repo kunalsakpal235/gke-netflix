@@ -102,4 +102,8 @@ fi
 
 echo
 echo "=== Watching pods come up across all namespaces — Ctrl+C once everything shows Running/Ready ==="
+
+echo"=== scaling down streaming-staging and streaming-production resources to 0"
+bash /opt/gke-netflix/streaming-platform/scripts/streaming-staging-prod-scale-down.sh
+
 kubectl get pods -A -w
