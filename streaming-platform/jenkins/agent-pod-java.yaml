@@ -8,15 +8,15 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
-        limits: { ephemeral-storage: 1536Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1280Mi }
+        limits: { ephemeral-storage: 1280Mi }
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
-        limits: { ephemeral-storage: 1536Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1280Mi }
+        limits: { ephemeral-storage: 1280Mi }
     - name: tools
       image: alpine:3.20
       command: ["cat"]
@@ -29,9 +29,6 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        # Estimated: pure Java analysis never triggers the embedded Node runtime that
-        # forced this higher on the node template. Not isolation-tested at this exact
-        # value - if it evicts, this is the first number to revisit.
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
         limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
     - name: gradle
@@ -46,9 +43,13 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        # Proven: exact value that handled the ~900MB Java DB repeatedly, no failures.
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 4000Mi }
-        limits: { ephemeral-storage: 4000Mi }
+        # Bumped 4000Mi -> 5500Mi: evicted at exactly 4000Mi even though that value had
+        # worked days earlier. Trivy's vulnerability databases update continuously - the
+        # Java DB (measured at ~908MB this run) genuinely grows over time, so a value
+        # proven sufficient once isn't permanently sufficient. This gives real margin
+        # above the current measured size, not another razor-thin buffer.
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 5500Mi }
+        limits: { ephemeral-storage: 5500Mi }
     - name: jnlp
       resources:
         requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
