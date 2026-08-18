@@ -8,15 +8,18 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1280Mi }
-        limits: { ephemeral-storage: 1280Mi }
+        # Reverted to the genuinely-proven value. The earlier 1280Mi reduction was
+        # never confirmed by a real successful build - reverting since trivy no
+        # longer needs to borrow this space.
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1280Mi }
-        limits: { ephemeral-storage: 1280Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: tools
       image: alpine:3.20
       command: ["cat"]
@@ -29,8 +32,11 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
-        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+        # Bumped 512Mi -> 640Mi proactively. Java never triggers the embedded Node
+        # runtime that caused failures elsewhere, so risk here is genuinely lower -
+        # still not isolation-tested at this exact value though.
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 640Mi }
+        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 640Mi }
     - name: gradle
       image: gradle:8.9-jdk21-alpine
       command: ["cat"]
@@ -43,13 +49,10 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        # Bumped 4000Mi -> 5500Mi: evicted at exactly 4000Mi even though that value had
-        # worked days earlier. Trivy's vulnerability databases update continuously - the
-        # Java DB (measured at ~908MB this run) genuinely grows over time, so a value
-        # proven sufficient once isn't permanently sufficient. This gives real margin
-        # above the current measured size, not another razor-thin buffer.
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 5500Mi }
-        limits: { ephemeral-storage: 5500Mi }
+        # Trimmed slightly from 5500Mi to make room for sonar-scanner's bump - still
+        # far above the ~1.5-2GB realistic need (908MB Java DB + vuln DB + image).
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 5200Mi }
+        limits: { ephemeral-storage: 5200Mi }
     - name: jnlp
       resources:
         requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }

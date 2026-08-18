@@ -8,15 +8,17 @@ spec:
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1024Mi }
-        limits: { ephemeral-storage: 1024Mi }
+        # Bumped from the untested 1024Mi to the value genuinely proven for Go
+        # builds under the old shared template, rather than leave an unverified guess.
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1024Mi }
-        limits: { ephemeral-storage: 1024Mi }
+        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        limits: { ephemeral-storage: 1536Mi }
     - name: tools
       image: alpine:3.20
       command: ["cat"]
@@ -29,8 +31,9 @@ spec:
       command: ["cat"]
       tty: true
       resources:
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
-        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 512Mi }
+        # Bumped from the untested 512Mi, using the template's large available slack.
+        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 768Mi }
+        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 768Mi }
     - name: golang
       image: golang:1.26-alpine
       command: ["cat"]
@@ -44,7 +47,7 @@ spec:
       tty: true
       resources:
         requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 1536Mi }
-        limits: { ephemeral-storage: 1536i }
+        limits: { ephemeral-storage: 1536Mi }
     - name: jnlp
       resources:
         requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
