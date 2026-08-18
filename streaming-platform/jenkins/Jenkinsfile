@@ -17,6 +17,9 @@ pipeline {
           // a fixed 10Gi Autopilot ceiling was the root cause of the repeated ephemeral
           // storage evictions tonight. Three right-sized templates, selected by SVC,
           // fixes this structurally instead of continuing to reshuffle one fixed budget.
+          currentBuild.displayName = "#${env.BUILD_NUMBER} - ${SVC}"
+          currentBuild.description = "Deploying ${SVC} to dev"
+
           def podYamlFile =
             (SVC in ['catalog-service', 'user-service']) ? 'streaming-platform/jenkins/agent-pod-java.yaml' :
             (SVC in ['frontend', 'api-gateway'])          ? 'streaming-platform/jenkins/agent-pod-node.yaml' :
