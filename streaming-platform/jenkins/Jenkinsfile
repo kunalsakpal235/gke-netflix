@@ -79,10 +79,19 @@ pipeline {
                 }
               }
 
-              stage('Approval') {
-                input message: "Deploy ${SVC} to dev?", ok: 'Ship it'
+              //stage('Approval') {
+              //  input message: "Deploy ${SVC} to dev?", ok: 'Ship it'
+              //}
+             stage('Approval') {
+                mail(
+                  to: 'kunalsakpal235@gmail.com',
+                  subject: "[Action needed] Approve ${SVC} deployment - build #${env.BUILD_NUMBER}",
+                  body: "Build #${env.BUILD_NUMBER} for ${SVC} (commit ${env.GIT_COMMIT}) passed SonarQube and Trivy and is waiting for approval.\n\nApprove or reject here: ${env.BUILD_URL}\n\nThis will auto-abort in 30 minutes if no action is taken."
+                )
+                timeout(time: 30, unit: 'MINUTES') {
+                  input message: "Deploy ${SVC} to dev?", ok: 'Ship it', submitter: 'admin'
+                }
               }
-
               stage('GitOps commit') {
                 container('tools') {
                   withCredentials([usernamePassword(credentialsId: 'github-pat', usernameVariable: 'U', passwordVariable: 'P')]) {
@@ -113,7 +122,28 @@ pipeline {
                   }
                 }
               }
-            }
+              
+              stage('Notify') {
+                mail(
+                  to: 'YOUR_EMAIL@example.com',
+                  subject: "[Deployed] ${SVC} - build #${env.BUILD_NUMBER}",
+                  body: """${SVC} deployed successfully to dev.
+
+Commit:      ${env.GIT_COMMIT}
+Image:       ${IMAGE}
+Approved by: ${env.BUILD_USER ?: 'see build page'}
+Build:       ${env.BUILD_URL}
+
+SonarQube:   http://130.211.5.190.nip.io/sonarqube/dashboard?id=${SVC}
+ArgoCD app:  http://130.211.5.190.nip.io/argocd/applications/streaming-dev
+
+Trivy scan: HIGH/CRITICAL clean (build would have failed otherwise)
+Quality Gate: passed (build would have failed otherwise)
+"""
+                )
+              } 
+          
+           }
           }
         }
       }
