@@ -11,14 +11,14 @@ spec:
         # Reverted to the genuinely-proven value. The earlier 1280Mi reduction was
         # never confirmed by a real successful build - reverting since trivy no
         # longer needs to borrow this space.
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1536Mi }
         limits: { ephemeral-storage: 1536Mi }
     - name: kaniko-push
       image: gcr.io/kaniko-project/executor:debug
       command: ["/busybox/cat"]
       tty: true
       resources:
-        requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1536Mi }
+        requests: { cpu: 250m, memory: 1Gi, ephemeral-storage: 1536Mi }
         limits: { ephemeral-storage: 1536Mi }
     - name: tools
       image: alpine:3.20
@@ -35,14 +35,14 @@ spec:
         # Bumped 512Mi -> 640Mi proactively. Java never triggers the embedded Node
         # runtime that caused failures elsewhere, so risk here is genuinely lower -
         # still not isolation-tested at this exact value though.
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 640Mi }
-        limits: { cpu: 250m, memory: 512Mi, ephemeral-storage: 640Mi }
+        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 512Mi }
+        limits: { cpu: 100m, memory: 512Mi, ephemeral-storage: 512Mi }
     - name: gradle
       image: gradle:8.9-jdk21-alpine
       command: ["cat"]
       tty: true
       resources:
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 256Mi }
         limits: { ephemeral-storage: 256Mi }
     - name: trivy
       image: aquasec/trivy:latest
@@ -51,7 +51,7 @@ spec:
       resources:
         # Trimmed slightly from 5500Mi to make room for sonar-scanner's bump - still
         # far above the ~1.5-2GB realistic need (908MB Java DB + vuln DB + image).
-        requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 5200Mi }
+        requests: { cpu: 100m, memory: 512Mi, ephemeral-storage: 5200Mi }
         limits: { ephemeral-storage: 5200Mi }
     - name: jnlp
       resources:

@@ -9,9 +9,15 @@ spec:
   replicas: {{ $.Values.replicaCount }}
   selector: { matchLabels: { app: {{ .name }} } }
   template:
-    metadata: { labels: { app: {{ .name }} } }
+    metadata: { labels: { app: {{ .name }}, tier: streaming-app } }
     spec:
       serviceAccountName: {{ $.Values.serviceAccountName }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { tier: streaming-app }
       containers:
         - name: {{ .name }}
           image: "{{ .image.repository }}:{{ .image.tag }}"
