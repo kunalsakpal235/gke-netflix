@@ -1,0 +1,20 @@
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: grafana-healthcheck
+  namespace: monitoring
+spec:
+  default:
+    checkIntervalSec: 15
+    config:
+      httpHealthCheck:
+        port: 3000
+        requestPath: /grafana/api/health
+      type: HTTP
+    healthyThreshold: 1
+    timeoutSec: 5
+    unhealthyThreshold: 2
+  targetRef:
+    group: ""
+    kind: Service
+    name: monitoring-grafana
