@@ -1,0 +1,47 @@
+# Node-level metrics, kube-system scrape targets, and coreDns monitoring are all
+# fundamentally incompatible with GKE Autopilot's security model - node-exporter
+# needs hostNetwork/hostPID/raw hostPath access, which Autopilot categorically
+# blocks for every workload. GMP (already running on this cluster by default)
+# covers node-level hardware metrics instead, via Google's own Autopilot-compatible
+# mechanism. This stack focuses on Kubernetes-object-level metrics (kube-state-metrics)
+# and future application-level /metrics endpoints instead.
+nodeExporter:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+coreDns:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 3d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 8Gi
+
+grafana:
+  persistence:
+    enabled: false
+  defaultDashboardsEnabled: true
+  grafana.ini:
+    server:
+      root_url: "http://130.211.5.190.nip.io/grafana"
+      serve_from_sub_path: true
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          resources:
+            requests:
+              storage: 2Gi
